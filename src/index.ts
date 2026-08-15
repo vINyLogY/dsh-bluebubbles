@@ -55,6 +55,18 @@ function pickEnvValue(text: string, name: string): string | null {
   return (m[1] || m[2] || m[3] || '').trim()
 }
 
+// 解析心跳间隔："30m"/"2h"/"12h"/"90s"/"5000ms"；裸数字按小时
+function parseHeartbeatInterval(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === '') return null
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw)
+  if (!m) return null
+  const n = Number(m[1])
+  if (!Number.isFinite(n) || n <= 0) return null
+  const unit = (m[2] || 'h').toLowerCase()
+  const ms = unit === 'ms' ? n : unit === 's' ? n * 1000 : unit === 'm' ? n * 60 * 1000 : n * 3600 * 1000
+  return ms
+}
+
 export default {
   inject: ['tools', 'shell'],
   apply(ctx: Context) {
@@ -494,7 +506,7 @@ export default {
       // 注意 .env 只在进程启动时由 DSH 注入，热重载不会重读；
       // 这里自己再解析一遍，保证热重载后凭据不丢。
       let fileText: string | null = null
-      if (state.password === '' || process.env.BLUEBUBBLES_HEARTBEAT_MS === undefined) {
+      if (state.password === '' || process.env.BLUEBUBBLES_HEARTBEAT_INTERVAL === undefined) {
         for (const file of ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"']) {
           try {
             const spec = ctx.shell.resolve({ command: 'cat ' + file + ' 2>/dev/null', timeoutMs: 8000, stdoutMaxBytes: 32768 })
@@ -529,13 +541,13 @@ export default {
 
       // 心跳：仅当存在 heartbeat:true 的绑定时才启动计时器；首触发锚定墙钟边界
       const hbEnabled = Object.values(state.bindings).some((b) => b && b.heartbeat === true)
-      let hbRaw = process.env.BLUEBUBBLES_HEARTBEAT_MS
+      let hbRaw = process.env.BLUEBUBBLES_HEARTBEAT_INTERVAL
       if (hbRaw === undefined && fileText) {
-        const fromFile = pickEnvValue(fileText, 'BLUEBUBBLES_HEARTBEAT_MS')
+        const fromFile = pickEnvValue(fileText, 'BLUEBUBBLES_HEARTBEAT_INTERVAL')
         if (fromFile) hbRaw = fromFile
       }
-      const hbNum = hbRaw !== undefined ? Number(hbRaw) : NaN
-      const heartbeatMs = Number.isFinite(hbNum) && hbNum >= 60000 ? hbNum : 12 * 60 * 60 * 1000
+      const parsed = parseHeartbeatInterval(hbRaw)
+      const heartbeatMs = parsed !== null && parsed >= 60000 ? parsed : 12 * 60 * 60 * 1000
       const timer = getService<TimerService>(ctx, 'timer')
       if (timer && hbEnabled) {
         const firstDelay = heartbeatMs - (Date.now() % heartbeatMs)
@@ -543,7 +555,7 @@ export default {
           void heartbeatTick()
           timer.interval(() => { void heartbeatTick() }, heartbeatMs)
         }, firstDelay), 'heartbeat')
-        console.log('bb: 心跳已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发（BLUEBUBBLES_HEARTBEAT_MS 可调，最小 1 分钟）')
+        console.log('bb: 心跳已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发（BLUEBUBBLES_HEARTBEAT_INTERVAL 可调，如 30m/2h，最小 1 分钟）')
       } else if (!hbEnabled) {
         console.log('bb: 心跳未启用（没有 heartbeat:true 的绑定）')
       } else {
