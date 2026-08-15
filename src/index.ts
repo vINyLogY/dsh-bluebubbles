@@ -299,8 +299,21 @@ export default {
       return n + 'B'
     }
 
-    async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {
-      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
+    // ---- 诊断面包屑（BLUEBUBBLES_DEBUG=1 时写入 $DSH_HOME/bluebubbles-debug.log）----
+    const debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
+    async function dbg(line: string): Promise<void> {
+      if (!debugEnabled) return
+      try {
+        await ctx.shell.run(ctx.shell.resolve({
+          command: 'echo ' + shEscape(new Date().toISOString() + ' ' + line) + ' >> "$HOME/.dsh/bluebubbles-debug.log"',
+          timeoutMs: 8000,
+        }))
+      } catch {
+        // 诊断失败不影响主流程
+      }
+    }
+
+    async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
       const safe = (name.replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'attachment')
       const filePath = dir + '/' + guid + '-' + safe
       try {
@@ -327,12 +340,12 @@ export default {
       const text = m.text
       const attachments: any[] = Array.isArray(m.attachments) ? m.attachments : []
       const hasText = typeof text === 'string' && text.trim() !== ''
-      if (!hasText && attachments.length === 0) return
-      if (m.isFromMe) return
-      if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) return
+      if (!hasText && attachments.length === 0) { await dbg('drop:empty text&atts'); return }
+      if (m.isFromMe) { await dbg('drop:isFromMe'); return }
+      if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) { await dbg('drop:tempGuid'); return }
       const guid = typeof m.guid === 'string' ? m.guid : null
       if (guid) {
-        if (seenGuids.has(guid)) return
+        if (seenGuids.has(guid)) { await dbg('drop:seenGuid ' + guid); return }
         seenGuids.add(guid)
         if (seenGuids.size > SEEN_GUIDS_MAX) {
           const oldest = seenGuids.values().next()
@@ -356,17 +369,20 @@ export default {
         }
       }
       if (!binding) {
+        await dbg('drop:no-binding keys=' + JSON.stringify(keys) + ' bindings=' + JSON.stringify(Object.keys(state.bindings)))
         console.log('bb: 未绑定会话，忽略消息（' + (chatName || sender || chatGuid || '未知') + '）')
         return
       }
 
       const sessionId = await resolveSession(workspaces, binding)
       if (!sessionId) {
+        await dbg('drop:no-session binding=' + JSON.stringify(binding) + ' wsSvc=' + (workspaces ? 'yes' : 'NO'))
         console.log('bb: 绑定目标无会话：' + JSON.stringify(binding))
         return
       }
       const agent = agents ? agents.get(sessionId) : undefined
       if (!agent) {
+        await dbg('drop:no-agent session=' + sessionId + ' agentsSvc=' + (agents ? 'yes' : 'NO'))
         console.log('bb: 目标会话无活跃 agent：' + sessionId)
         return
       }
@@ -392,6 +408,7 @@ export default {
       const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + body
       // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
+        await dbg('delivered session=' + sessionId)
         console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
       }
     }
