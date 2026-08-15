@@ -99,6 +99,36 @@ export default {
       return { ok: true, data: hasData ? parsed.data : parsed }
     }
 
+    async function curlMultipart(path: string, fields: Record<string, string>, filePath: string, fileName: string): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+      const url = endpoint(path)
+      const parts: string[] = ["curl -sS -m 60 -X POST"]
+      for (const [key, value] of Object.entries(fields)) {
+        // --form-string：值按字面传递，chatGuid 里的 ';' '+' 不会被 curl 的 -F 语法吞掉
+        parts.push("--form-string '" + shEscape(key + '=' + value) + "'")
+      }
+      parts.push("-F 'attachment=@" + shEscape(filePath) + ";filename=" + shEscape(fileName) + "'")
+      parts.push("'" + shEscape(url) + "'")
+      const command = parts.join(' ')
+      const spec: ShellExecSpec = ctx.shell.resolve({ command, timeoutMs: 70000, stdoutMaxBytes: 262144 } satisfies ShellExecRequest)
+      const run: ShellRunResult = await ctx.shell.run(spec)
+      if (run.exitCode !== 0) {
+        const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : (run.stdout ? run.stdout.text : '')).trim()
+        return { ok: false, error: 'curl 退出码 ' + run.exitCode + (run.timedOut ? '（超时）' : '') + (detail ? '：' + detail.slice(0, 300) : '') }
+      }
+      let parsed: any = null
+      try {
+        parsed = JSON.parse((run.stdout && run.stdout.text) || '')
+      } catch {
+        return { ok: false, error: '无法解析 BlueBubbles 响应：' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
+      }
+      if (parsed && typeof parsed.status === 'number' && parsed.status >= 400) {
+        const detail = parsed.error ? (parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
+        return { ok: false, error: detail }
+      }
+      const hasData = parsed && Object.prototype.hasOwnProperty.call(parsed, 'data')
+      return { ok: true, data: hasData ? parsed.data : parsed }
+    }
+
     // ================= 精简序列化 =================
     function compactMessage(m: Record<string, any>): Record<string, unknown> {
       return {
@@ -164,6 +194,20 @@ export default {
       })
       if (!result.ok) return result
       return { ok: true, tempGuid, guid: result.data && (result.data as any).guid ? (result.data as any).guid : null, text: result.data && (result.data as any).text ? (result.data as any).text : null }
+    }
+
+    async function sendAttachment(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const filePath = String(args.filePath)
+      const tempGuid = 'dsh-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
+      const name = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : (filePath.split('/').pop() || 'attachment')
+      const method = args.method === 'apple-script' ? 'apple-script' : 'private-api'
+      const result = await curlMultipart('message/attachment', {
+        chatGuid: String(args.chatGuid),
+        tempGuid,
+        method,
+      }, filePath, name)
+      if (!result.ok) return result
+      return { ok: true, tempGuid, name, guid: result.data && (result.data as any).guid ? (result.data as any).guid : null }
     }
 
     // ================= 绑定表持久化 =================
@@ -450,6 +494,21 @@ export default {
         execute: async (args) => await sendText(args),
       }),
       define({
+        name: 'bluebubbles_send_attachment',
+        description: '通过 BlueBubbles 发送一条 iMessage 附件消息（图片/文件）。filePath 必须是运行 BlueBubbles 的 Mac 上的绝对路径。',
+        parameters: {
+          type: 'object',
+          properties: {
+            chatGuid: { type: 'string', description: '目标会话 GUID' },
+            filePath: { type: 'string', description: 'Mac 上要发送的文件的绝对路径' },
+            name: { type: 'string', description: '对方看到的文件名（默认取路径最后一段）' },
+            method: { type: 'string', enum: ['apple-script', 'private-api'], description: 'private-api（默认，更可靠）或 apple-script' },
+          },
+          required: ['chatGuid', 'filePath'],
+        },
+        execute: async (args) => await sendAttachment(args),
+      }),
+      define({
         name: 'bluebubbles_bind',
         description: '把 iMessage 会话绑定到 DSH 工作区或会话：新消息将通过 webhook 投递为目标会话的用户消息。workspacePath 与 sessionId 二选一（sessionId 更精确，workspacePath 解析到该工作区最新的会话）。',
         parameters: {
@@ -524,6 +583,7 @@ export default {
       listChats: (args: Record<string, unknown>) => listChats(args || {}),
       getMessages: (args: Record<string, unknown>) => getMessages(args || {}),
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
+      sendAttachment: (args: Record<string, unknown>) => sendAttachment(args || {}),
       bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
         const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
         state.bindings['chat:' + args.chatGuid] = binding
