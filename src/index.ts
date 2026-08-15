@@ -24,7 +24,7 @@ interface Binding {
 }
 
 export default {
-  inject: ['tools', 'shell'],
+  inject: ['tools', 'shell', 'webServer', 'agents', 'fs', 'workspaceRegistry'],
   apply(ctx: Context) {
     const webServer = getService<WebServerService>(ctx, 'webServer')
     const agents = getService<AgentsService>(ctx, 'agents')
@@ -344,6 +344,7 @@ export default {
       const text = m.text
       const attachments: any[] = Array.isArray(m.attachments) ? m.attachments : []
       const hasText = typeof text === 'string' && text.trim() !== ''
+      await dbg('event guid=' + (m.guid || '?') + ' isFromMe=' + m.isFromMe + ' sender=' + (m.handle && m.handle.address || '?') + ' tempGuid=' + (m.tempGuid || '?') + ' chats0=' + ((Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || '?') + ' text=' + String(text || '').slice(0, 40))
       if (!hasText && attachments.length === 0) { await dbg('drop:empty text&atts'); return }
       if (m.isFromMe) { await dbg('drop:isFromMe'); return }
       if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) { await dbg('drop:tempGuid'); return }
@@ -445,7 +446,9 @@ export default {
         console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），等待 bluebubbles_configure')
       }
     }
-    void bootstrap()
+    void bootstrap().catch((err: unknown) => {
+      console.log('bb: 启动引导失败：' + (err instanceof Error ? err.message : err))
+    })
 
     // ================= 工具定义与注册 =================
     const OUTPUT = {
