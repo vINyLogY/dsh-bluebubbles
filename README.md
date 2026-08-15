@@ -27,7 +27,7 @@ BlueBubbles 服务器（新消息）
 DSH webServer 路由  /bluebubbles/webhook  (loopback-only)
    │  查绑定表 chatGuid → workspacePath
    ▼
-workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-turn', true)
+workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step', true)
    ▼
 该工作区的模型被唤醒，收到一条标注来源的用户消息
 ```

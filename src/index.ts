@@ -436,7 +436,8 @@ export default {
         content: [{ type: 'text', text: line }],
         source: { kind: 'plugin', plugin: 'dsh-bluebubbles' },
       } as unknown as UserMessage
-      agent.send(message, 'next-turn', true)
+      // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
+      agent.send(message, 'next-step', true)
       console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
     }
 
