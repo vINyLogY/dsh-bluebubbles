@@ -300,7 +300,7 @@ export default {
     }
 
     // ---- 诊断面包屑（BLUEBUBBLES_DEBUG=1 时写入 $DSH_HOME/bluebubbles-debug.log）----
-    const debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
+    let debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
     async function dbg(line: string): Promise<void> {
       if (!debugEnabled) return
       try {
@@ -431,6 +431,7 @@ export default {
             }
           }
         }
+        if (!debugEnabled && fileText) debugEnabled = pickEnvValue(fileText, 'BLUEBUBBLES_DEBUG') === '1'
       }
       await loadBindings()
       if (state.password !== '') {
