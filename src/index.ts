@@ -371,9 +371,8 @@ export default {
         return
       }
 
-      // 附件：最多取前 3 个。存储位置就近绑定目标：
-      // 工作区绑定 → <workspacePath>/.bluebubbles-media；sessionId 直连 → $DSH_HOME/bluebubbles-media
-      const mediaDir = binding.workspacePath ? binding.workspacePath + '/.bluebubbles-media' : dshHome + '/bluebubbles-media'
+      // 附件：统一存 $DSH_HOME/bluebubbles-media（agent 需要时自行复制进工作区）
+      const mediaDir = dshHome + '/bluebubbles-media'
       let attachmentBlock = ''
       if (attachments.length > 0) {
         const lines: string[] = []

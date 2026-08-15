@@ -106,9 +106,10 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 | --- | --- | --- | --- | --- |
 | `$DSH_HOME/bluebubbles-bindings.json` | `{ "chat:<guid>": { workspacePath \| sessionId } }` | bridge | 启动载入；bind/unbind 每次变更写盘 | 降级内存态（日志提示） |
 | `$DSH_HOME/heartbeat-targets.json` | `{ "标签": { workspacePath \| sessionId, heartbeatMd? } }` | dsh-heartbeat | 启动只读；改文件后热重载生效 | 读不到 = 心跳未启用 |
-| `<workspacePath>/.bluebubbles-media/` | 工作区绑定收到的附件 | bridge | 收附件时 `mkdir -p` + 下载 | 下载失败记日志，消息仍投递 |
-| `$DSH_HOME/bluebubbles-media/` | sessionId 绑定 / 手动下载的附件 | bridge | 同上 | 同上 |
+| `$DSH_HOME/bluebubbles-media/` | 所有收到的附件（含工作区绑定）+ 手动下载 | bridge | 收附件时 `mkdir -p` + 下载 | 下载失败记日志，消息仍投递 |
 | `<目标工作区>/HEARTBEAT.md` | 心跳提示引用的自查清单（agent 自读，插件不读） | 用户/agent | — | — |
+
+**媒体统一存 `$DSH_HOME/bluebubbles-media/`**；agent 需要把媒体放进工作区时自行 `cp`——`workspace-write` 沙箱下"读外部 + 写工作区"无需提权。
 
 **会话解析链**（`lib.resolveSession`）：`sessionId` 直连（精确，无 fallback）→ 否则 `workspacePath` → 该工作区 `sessionIds[0]`（最新会话）→ `agents.get` 校验活跃 → 无活跃 agent 则丢弃并记日志（不回退到次新会话、不排队补投）。
 
