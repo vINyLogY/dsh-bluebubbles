@@ -40,7 +40,6 @@ function getService<T>(ctx: Context, name: string): T | undefined {
 interface Binding {
   workspacePath?: string
   sessionId?: string
-  heartbeat?: boolean
 }
 
 // 从 dotenv 风格文本里提取 KEY=VALUE（支持 export 前缀、引号）
@@ -620,7 +619,6 @@ export default {
             chatGuid: { type: 'string', description: '会话 GUID（来自 bluebubbles_list_chats）' },
             workspacePath: { type: 'string', description: '目标 DSH 工作区的目录路径（与 sessionId 二选一）' },
             sessionId: { type: 'string', description: '目标 DSH 会话 ID（与 workspacePath 二选一，优先）' },
-            heartbeat: { type: 'boolean', description: '为该绑定启用心跳：定时注入 HEARTBEAT 提示（工作区绑定还要求该工作区存在 HEARTBEAT.md）' },
           },
           required: ['chatGuid'],
         },
@@ -629,9 +627,7 @@ export default {
           const sessionId = typeof args.sessionId === 'string' && args.sessionId.trim() !== '' ? args.sessionId.trim() : null
           if (!workspacePath && !sessionId) return { ok: false, error: 'workspacePath 与 sessionId 至少提供一个' }
           const key = 'chat:' + String(args.chatGuid)
-          const binding: Binding = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
-          if (args.heartbeat === true) binding.heartbeat = true
-          state.bindings[key] = binding
+          state.bindings[key] = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
           await saveBindings()
           return { ok: true, key, binding: state.bindings[key], total: Object.keys(state.bindings).length }
         },
@@ -691,9 +687,8 @@ export default {
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
       sendAttachment: (args: Record<string, unknown>) => sendAttachment(args || {}),
       getAttachment: (args: { guid: string; name?: string }) => downloadAttachment(args.guid, args.name || 'attachment'),
-      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string; heartbeat?: boolean }) => {
+      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
         const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
-        if (args.heartbeat === true) binding.heartbeat = true
         state.bindings['chat:' + args.chatGuid] = binding
         return saveBindings()
       },

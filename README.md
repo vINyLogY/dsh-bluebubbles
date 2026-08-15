@@ -69,11 +69,13 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 - 绑定表持久化于 `$DSH_HOME/bluebubbles-bindings.json`（默认 `~/.dsh`；可用 `BLUEBUBBLES_BINDINGS` 覆盖路径），插件重载/重启后自动恢复。
 - 未绑定的会话消息只会记日志，不会打扰任何工作区。
 
-### 心跳（可选）
+### 心跳（独立组件 dsh-heartbeat）
 
-- 绑定参数 `heartbeat: true` 开启该绑定的心跳；工作区绑定还要求 `<workspace>/HEARTBEAT.md` 存在才会注入。
-- 间隔：`BLUEBUBBLES_HEARTBEAT_INTERVAL`，支持 `30m` / `2h` / `12h`（裸数字按小时，`s`/`ms` 也可），默认 `12h`，下限 1 分钟；首触发锚定墙钟边界（12h → 0:00/12:00）。
-- 提示语为 OpenClaw 同款（读 HEARTBEAT.md，无事回 HEARTBEAT_OK）；目标会话无活跃 agent 时静默跳过。
+- 与频道无关的通用定时唤醒；目标自持配置于 `$DSH_HOME/heartbeat-targets.json`：
+  `{ "标签": { "workspacePath": "…" } 或 { "sessionId": "…" }, "heartbeatMd": "可选自定义提示文件路径" }`
+- 提示语默认读工作区根的 `HEARTBEAT.md`（OpenClaw 同款语义，无事回 HEARTBEAT_OK）；目标会话无活跃 agent 时静默跳过。
+- 间隔：`BLUEBUBBLES_HEARTBEAT_INTERVAL`，支持 `30m` / `2h` / `12h`（裸数字按小时，`s`/`ms` 也可），默认 `12h`，下限 1 分钟；首触发锚定墙钟边界。
+- 修改 targets 后热重载心跳行（patch 里 `?v=N` +1）即重读。
 
 ### 4. 更新代码
 

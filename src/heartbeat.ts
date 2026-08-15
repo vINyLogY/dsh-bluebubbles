@@ -1,7 +1,8 @@
-// dsh-bluebubbles-heartbeat — 独立心跳行。
-// 只依赖 timer + shell + bluebubbles 服务（由主桥行提供），
-// 只负责：按 wall-clock 边界定时，向 heartbeat:true 且目标会话活跃的绑定
-// 注入 OpenClaw 兼容的 HEARTBEAT 提示。不做任何频道相关的事。
+// dsh-heartbeat — 通用心跳组件（与任何频道无关）。
+// 自持目标配置：$DSH_HOME/heartbeat-targets.json
+//   { "标签": { "workspacePath": "…" } 或 { "sessionId": "…" }, "heartbeatMd": "可选自定义路径" }
+// 定时向目标会话注入 HEARTBEAT 提示（默认读工作区根的 HEARTBEAT.md）。
+// 依赖：timer + shell + fs（只读自己的配置文件）；不依赖 bluebubbles。
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -19,13 +20,15 @@ interface AgentsService {
 interface WorkspaceRegistryService {
   resolveByPath(path: string): Promise<Workspace | undefined>
 }
-interface BluebubblesBinding {
+interface FsTarget {}
+interface FsService {
+  resolve(path: string): Promise<FsTarget>
+  readText(target: FsTarget): Promise<string>
+}
+interface HeartbeatTarget {
   workspacePath?: string
   sessionId?: string
-  heartbeat?: boolean
-}
-interface BluebubblesService {
-  listBindings(): Record<string, BluebubblesBinding>
+  heartbeatMd?: string
 }
 
 function getService<T>(ctx: Context, name: string): T | undefined {
@@ -51,59 +54,81 @@ function parseHeartbeatInterval(raw: string | undefined): number | null {
   return unit === 'ms' ? n : unit === 's' ? n * 1000 : unit === 'm' ? n * 60 * 1000 : n * 3600 * 1000
 }
 
-const HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+const DEFAULT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
 export default {
   inject: {
     required: ['timer', 'shell'],
-    optional: ['bluebubbles'],
+    optional: ['fs'],
   },
   apply(ctx: Context) {
     const timer = (ctx as unknown as { timer: TimerService }).timer
-    const bluebubbles = (ctx as unknown as { bluebubbles?: BluebubblesService }).bluebubbles
+    const fs = getService<FsService>(ctx, 'fs')
     const agents = getService<AgentsService>(ctx, 'agents')
     const workspaces = getService<WorkspaceRegistryService>(ctx, 'workspaceRegistry')
+    const dshHome = (process.env.DSH_HOME || process.env.HOME + '/.dsh') as string
+    const targetsPath = (process.env.BLUEBUBBLES_HEARTBEAT_TARGETS || dshHome + '/heartbeat-targets.json') as string
 
-    async function resolveSessionFor(binding: BluebubblesBinding): Promise<string | null> {
-      if (binding && binding.sessionId) return binding.sessionId
-      if (!binding || !binding.workspacePath || !workspaces) return null
+    let targets: Record<string, HeartbeatTarget> = {}
+
+    async function loadTargets(): Promise<void> {
+      if (!fs) return
       try {
-        const ws = await workspaces.resolveByPath(binding.workspacePath)
+        const target = await fs.resolve(targetsPath)
+        const text = await fs.readText(target)
+        const parsed: unknown = JSON.parse(text)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          targets = parsed as Record<string, HeartbeatTarget>
+          console.log('hb: 已载入心跳目标（' + Object.keys(parsed).length + ' 个）')
+        }
+      } catch (err) {
+        console.log('hb: 心跳目标载入跳过：' + (err instanceof Error ? err.message : err))
+      }
+    }
+
+    async function resolveSessionFor(t: HeartbeatTarget): Promise<string | null> {
+      if (t && t.sessionId) return t.sessionId
+      if (!t || !t.workspacePath || !workspaces) return null
+      try {
+        const ws = await workspaces.resolveByPath(t.workspacePath)
         if (ws && Array.isArray(ws.sessionIds) && ws.sessionIds.length > 0) return ws.sessionIds[0] as string
       } catch (err) {
-        console.log('bb-hb: 解析工作区失败：' + (err instanceof Error ? err.message : err))
+        console.log('hb: 解析工作区失败：' + (err instanceof Error ? err.message : err))
       }
       return null
     }
 
     async function tick(): Promise<void> {
-      if (!bluebubbles) return
-      const bindings = bluebubbles.listBindings()
-      const enabled = Object.entries(bindings).filter(([, b]) => b && b.heartbeat === true)
-      if (enabled.length === 0) return
-      for (const [key, binding] of enabled) {
+      const entries = Object.entries(targets)
+      if (entries.length === 0) return
+      for (const [label, target] of entries) {
+        if (!target || (!target.workspacePath && !target.sessionId)) continue
         try {
-          const sessionId = await resolveSessionFor(binding)
+          const sessionId = await resolveSessionFor(target)
           if (!sessionId) continue
           const agent = agents ? agents.get(sessionId) : undefined
           if (!agent) continue
+          const prompt = target.heartbeatMd
+            ? 'Read ' + target.heartbeatMd + ' (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+            : DEFAULT_PROMPT
           const message = {
-            id: 'bb-hb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
+            id: 'hb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
             role: 'user',
-            content: [{ type: 'text', text: HEARTBEAT_PROMPT }],
-            source: { kind: 'plugin', plugin: 'dsh-bluebubbles-heartbeat' },
+            content: [{ type: 'text', text: prompt }],
+            source: { kind: 'plugin', plugin: 'dsh-heartbeat' },
           } as unknown as UserMessage
           agent.send(message, 'next-turn', true)
-          console.log('bb-hb: 心跳已投递 → ' + key)
+          console.log('hb: 心跳已投递 → ' + label)
         } catch (err) {
-          console.log('bb-hb: 心跳投递失败 ' + key + '：' + (err instanceof Error ? err.message : err))
+          console.log('hb: 心跳投递失败 ' + label + '：' + (err instanceof Error ? err.message : err))
         }
       }
     }
 
     const bootstrap = async () => {
-      if (!bluebubbles) {
-        console.log('bb-hb: bluebubbles 服务未就绪，等待主桥行')
+      await loadTargets()
+      if (Object.keys(targets).length === 0) {
+        console.log('hb: 未启用（' + targetsPath + ' 为空或不存在）')
         return
       }
       let raw = process.env.BLUEBUBBLES_HEARTBEAT_INTERVAL
@@ -118,25 +143,18 @@ export default {
               break
             }
           } catch (err) {
-            console.log('bb-hb: 读取 ' + file + ' 失败：' + (err instanceof Error ? err.message : err))
+            console.log('hb: 读取 ' + file + ' 失败：' + (err instanceof Error ? err.message : err))
           }
         }
       }
       const parsed = parseHeartbeatInterval(raw)
       const heartbeatMs = parsed !== null && parsed >= 60000 ? parsed : 12 * 60 * 60 * 1000
-
-      const bindings = bluebubbles.listBindings()
-      const hbEnabled = Object.values(bindings).some((b) => b && b.heartbeat === true)
-      if (!hbEnabled) {
-        console.log('bb-hb: 未启用（没有 heartbeat:true 的绑定）')
-        return
-      }
       const firstDelay = heartbeatMs - (Date.now() % heartbeatMs)
       ctx.effect(() => timer.timeout(() => {
         void tick()
         timer.interval(() => { void tick() }, heartbeatMs)
       }, firstDelay), 'heartbeat')
-      console.log('bb-hb: 已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发')
+      console.log('hb: 已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发')
     }
     void bootstrap()
   },
