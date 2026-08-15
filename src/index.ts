@@ -30,6 +30,9 @@ interface WorkspaceRegistryService {
 interface WebServerService {
   register(route: WebRoute): () => void
 }
+interface TimerService {
+  interval(callback: () => void, delay: number): () => void
+}
 
 function getService<T>(ctx: Context, name: string): T | undefined {
   const raw = (ctx as unknown as { get(name: string): unknown }).get(name)
@@ -441,31 +444,60 @@ export default {
       console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
     }
 
+    // ================= 心跳（OpenClaw 兼容） =================
+    const HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+
+    async function heartbeatTick(): Promise<void> {
+      const entries = Object.entries(state.bindings)
+      if (entries.length === 0) return
+      for (const [key, binding] of entries) {
+        try {
+          const sessionId = await resolveSessionFor(binding)
+          if (!sessionId) continue
+          const agent = agents ? agents.get(sessionId) : undefined
+          if (!agent) continue
+          const message = {
+            id: 'bb-hb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
+            role: 'user',
+            content: [{ type: 'text', text: HEARTBEAT_PROMPT }],
+            source: { kind: 'plugin', plugin: 'dsh-bluebubbles' },
+          } as unknown as UserMessage
+          agent.send(message, 'next-turn', true)
+          console.log('bb: 心跳已投递 → ' + key)
+        } catch (err) {
+          console.log('bb: 心跳投递失败 ' + key + '：' + (err instanceof Error ? err.message : err))
+        }
+      }
+    }
+
     // ================= 启动引导（一次性，无订阅可清理） =================
     const bootstrap = async () => {
       // 凭据链：process.env → ~/.dsh/.env → ~/.zshenv。
       // 注意 .env 只在进程启动时由 DSH 注入，热重载不会重读；
       // 这里自己再解析一遍，保证热重载后凭据不丢。
-      if (state.password === '') {
+      let fileText: string | null = null
+      if (state.password === '' || process.env.BLUEBUBBLES_HEARTBEAT_MS === undefined) {
         for (const file of ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"']) {
           try {
             const spec = ctx.shell.resolve({ command: 'cat ' + file + ' 2>/dev/null', timeoutMs: 8000, stdoutMaxBytes: 32768 })
             const run = await ctx.shell.run(spec)
-            if (run.exitCode === 0) {
-              const text = (run.stdout && run.stdout.text) || ''
-              const pw = pickEnvValue(text, 'BLUEBUBBLES_PASSWORD')
-              if (pw) {
-                state.password = pw
-                if (state.baseUrl === 'http://localhost:1234') {
-                  const url = pickEnvValue(text, 'BLUEBUBBLES_BASE_URL')
-                  if (url) state.baseUrl = url
-                }
-                console.log('bb: 凭据已从 ' + file + ' 载入')
-                break
-              }
+            if (run.exitCode === 0 && (run.stdout && run.stdout.text)) {
+              fileText = (run.stdout && run.stdout.text) || ''
+              console.log('bb: 已读取 ' + file)
+              break
             }
           } catch (err) {
             console.log('bb: 读取 ' + file + ' 失败：' + (err instanceof Error ? err.message : err))
+          }
+        }
+        if (fileText && state.password === '') {
+          const pw = pickEnvValue(fileText, 'BLUEBUBBLES_PASSWORD')
+          if (pw) {
+            state.password = pw
+            if (state.baseUrl === 'http://localhost:1234') {
+              const url = pickEnvValue(fileText, 'BLUEBUBBLES_BASE_URL')
+              if (url) state.baseUrl = url
+            }
           }
         }
       }
@@ -475,6 +507,22 @@ export default {
         console.log('bb: 凭据就绪（' + state.baseUrl + '），webhook 注册：' + JSON.stringify(wh))
       } else {
         console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），等待 bluebubbles_configure')
+      }
+
+      // 心跳间隔：env → .env/.zshenv → 默认 12h
+      let hbRaw = process.env.BLUEBUBBLES_HEARTBEAT_MS
+      if (hbRaw === undefined && fileText) {
+        const fromFile = pickEnvValue(fileText, 'BLUEBUBBLES_HEARTBEAT_MS')
+        if (fromFile) hbRaw = fromFile
+      }
+      const hbNum = hbRaw !== undefined ? Number(hbRaw) : NaN
+      const heartbeatMs = Number.isFinite(hbNum) && hbNum >= 60000 ? hbNum : 12 * 60 * 60 * 1000
+      const timer = getService<TimerService>(ctx, 'timer')
+      if (timer) {
+        ctx.effect(() => timer.interval(() => { void heartbeatTick() }, heartbeatMs), 'heartbeat')
+        console.log('bb: 心跳已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h（BLUEBUBBLES_HEARTBEAT_MS 可调，最小 1 分钟）')
+      } else {
+        console.log('bb: timer 服务不可用，心跳禁用')
       }
     }
     void bootstrap()
