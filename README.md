@@ -74,8 +74,16 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 - 与频道无关的通用定时唤醒；目标自持配置于 `$DSH_HOME/heartbeat-targets.json`：
   `{ "标签": { "workspacePath": "…" } 或 { "sessionId": "…" }, "heartbeatMd": "可选自定义提示文件路径" }`
 - 提示语默认读工作区根的 `HEARTBEAT.md`（OpenClaw 同款语义，无事回 HEARTBEAT_OK）；目标会话无活跃 agent 时静默跳过。
-- 间隔：`BLUEBUBBLES_HEARTBEAT_INTERVAL`，支持 `30m` / `2h` / `12h`（裸数字按小时，`s`/`ms` 也可），默认 `12h`，下限 1 分钟；首触发锚定墙钟边界。
+- 间隔：`DSH_HEARTBEAT_INTERVAL`，支持 `30m` / `2h` / `12h`（裸数字按小时，`s`/`ms` 也可），默认 `12h`，下限 1 分钟；首触发锚定墙钟边界。
 - 修改 targets 后热重载心跳行（patch 里 `?v=N` +1）即重读。
+
+### cron（独立组件 dsh-cron）
+
+- 精确时刻任务，配置于 `$DSH_HOME/cron-jobs.json`：
+  `{ "jobs": { "标签": { "schedule": "5 9 * * *", "target": { workspacePath|sessionId }, "prompt": "…" 或 "promptFile": "绝对路径" } } }`
+- schedule 为 5 字段 cron（分 时 日 月 周，支持 `*` `,` `-` `/`；周 0=周日）。
+- 到点把 prompt（或 promptFile 内容）以用户消息注入目标会话；目标无活跃 agent 时静默跳过；热重载不会在同一分钟重复触发。
+- 修改配置后热重载 cron 行即重读。
 
 ### 4. 更新代码
 
@@ -96,9 +104,11 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 | `DSH_HOME` | 所有 DSH 路径的根 | `~/.dsh` |
 | `BLUEBUBBLES_PASSWORD` | BlueBubbles 服务器密码 | 无（必需） |
 | `BLUEBUBBLES_BASE_URL` | 服务器地址 | `http://localhost:1234` |
-| `BLUEBUBBLES_HEARTBEAT_INTERVAL` | 心跳间隔（`30m`/`2h`/`12h`，裸数字=小时，下限 1 分钟） | `12h` |
+| `BLUEBUBBLES_HEARTBEAT_INTERVAL` | 已更名：见 `DSH_HEARTBEAT_INTERVAL` | — |
+| `DSH_HEARTBEAT_INTERVAL` | 心跳间隔（`30m`/`2h`/`12h`，裸数字=小时，下限 1 分钟） | `12h` |
 | `BLUEBUBBLES_BINDINGS` | 绑定表路径覆盖 | `$DSH_HOME/bluebubbles-bindings.json` |
-| `BLUEBUBBLES_HEARTBEAT_TARGETS` | 心跳目标路径覆盖 | `$DSH_HOME/heartbeat-targets.json` |
+| `DSH_HEARTBEAT_TARGETS` | 心跳目标路径覆盖 | `$DSH_HOME/heartbeat-targets.json` |
+| `DSH_CRON_JOBS` | cron 任务配置路径覆盖 | `$DSH_HOME/cron-jobs.json` |
 
 ### 绑定相关（重点）
 
@@ -106,6 +116,7 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 | --- | --- | --- | --- | --- |
 | `$DSH_HOME/bluebubbles-bindings.json` | `{ "chat:<guid>": { workspacePath \| sessionId } }` | bridge | 启动载入；bind/unbind 每次变更写盘 | 降级内存态（日志提示） |
 | `$DSH_HOME/heartbeat-targets.json` | `{ "标签": { workspacePath \| sessionId, heartbeatMd? } }` | dsh-heartbeat | 启动只读；改文件后热重载生效 | 读不到 = 心跳未启用 |
+| `$DSH_HOME/cron-jobs.json` | `{ "jobs": { "标签": { schedule, target, prompt \| promptFile } } }` | dsh-cron | 启动只读；改文件后热重载生效 | 读不到 = cron 未启用 |
 | `$DSH_HOME/bluebubbles-media/` | 所有收到的附件（含工作区绑定）+ 手动下载 | bridge | 收附件时 `mkdir -p` + 下载 | 下载失败记日志，消息仍投递 |
 | `<目标工作区>/HEARTBEAT.md` | 心跳提示引用的自查清单（agent 自读，插件不读） | 用户/agent | — | — |
 
@@ -119,8 +130,8 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 
 | 路径 | 说明 |
 | --- | --- |
-| `$DSH_HOME/profiles/web/cordis.patch.yml` | host 合成 patch 层：`bluebubbles-bridge`（`src/index.ts?v=N`）+ `dsh-heartbeat`（`src/heartbeat.ts?v=N`），保存即热重载 |
-| `/Users/you/ds-channel/bluebubbles-dsh/` | 插件源码仓库（`src/index.ts`、`src/heartbeat.ts`、`src/lib.ts`） |
+| `$DSH_HOME/profiles/web/cordis.patch.yml` | host 合成 patch 层：`bluebubbles-bridge`（`src/index.ts?v=N`）+ `dsh-heartbeat`（`src/heartbeat.ts?v=N`）+ `dsh-cron`（`src/cron.ts?v=N`），保存即热重载 |
+| `/Users/you/ds-channel/bluebubbles-dsh/` | 插件源码仓库（`src/index.ts`、`src/heartbeat.ts`、`src/cron.ts`、`src/lib.ts`） |
 | `http://127.0.0.1:3080/bluebubbles/webhook` | 本机回环 webhook 入口（BlueBubbles 服务器上注册为 id 10，事件 `new-message`） |
 | `http://localhost:1234/api/v1/*?password=…` | BlueBubbles REST（插件经 shell+curl 调用） |
 | `$DSH_HOME/storages/workspace.json` | 工作区注册表（`sessionIds` 顺序 = 会话解析依据；由 GUI 维护） |
