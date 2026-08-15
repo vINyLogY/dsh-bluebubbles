@@ -213,6 +213,7 @@ export default {
         chatGuid: String(args.chatGuid),
         tempGuid,
         method,
+        name,
       }, filePath, name)
       if (!result.ok) return result
       return { ok: true, tempGuid, name, guid: result.data && (result.data as any).guid ? (result.data as any).guid : null }
