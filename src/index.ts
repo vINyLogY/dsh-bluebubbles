@@ -9,45 +9,18 @@ import type { Context, Plugin } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-// ---- optional-service views (structural; the live instances satisfy these) ----
-interface FsTarget {}
-interface FsService {
-  resolve(path: string): Promise<FsTarget>
-  readText(target: FsTarget): Promise<string>
-  writeText(target: FsTarget, content: string): Promise<unknown>
-  stat?(target: FsTarget): Promise<unknown>
-}
-interface AgentsService {
-  get(id: string): Agent | undefined
-}
-interface WorkspaceRegistryService {
-  resolveByPath(path: string): Promise<Workspace | undefined>
-}
+import { getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
+import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
+
 interface WebServerService {
   register(route: WebRoute): () => void
-}
-
-function getService<T>(ctx: Context, name: string): T | undefined {
-  const raw = (ctx as unknown as { get(name: string): unknown }).get(name)
-  return raw as T | undefined
 }
 
 interface Binding {
   workspacePath?: string
   sessionId?: string
-}
-
-// 从 dotenv 风格文本里提取 KEY=VALUE（支持 export 前缀、引号）
-function pickEnvValue(text: string, name: string): string | null {
-  const re = new RegExp('(?:^|\\n)\\s*(?:export\\s+)?' + name + '=(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\']+))', 'm')
-  const m = re.exec(text)
-  if (!m) return null
-  return (m[1] || m[2] || m[3] || '').trim()
 }
 
 export default {
@@ -319,18 +292,6 @@ export default {
       processEvent(event).catch((err) => console.log('bb: 处理 webhook 事件失败：' + (err instanceof Error ? err.message : err)))
     }
 
-    async function resolveSessionFor(binding: Binding): Promise<string | null> {
-      if (binding && binding.sessionId) return binding.sessionId
-      if (!binding || !binding.workspacePath || !workspaces) return null
-      try {
-        const ws = await workspaces.resolveByPath(binding.workspacePath)
-        if (ws && Array.isArray(ws.sessionIds) && ws.sessionIds.length > 0) return ws.sessionIds[0] as string
-      } catch (err) {
-        console.log('bb: 解析工作区失败：' + (err instanceof Error ? err.message : err))
-      }
-      return null
-    }
-
     // ================= 附件下载（收图片） =================
     function fmtBytes(n: number): string {
       if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
@@ -399,7 +360,7 @@ export default {
         return
       }
 
-      const sessionId = await resolveSessionFor(binding)
+      const sessionId = await resolveSession(workspaces, binding)
       if (!sessionId) {
         console.log('bb: 绑定目标无会话：' + JSON.stringify(binding))
         return
@@ -430,16 +391,10 @@ export default {
 
       const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
       const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + body
-      // 内联构造（MessageId 只是类型品牌）：避免从本仓库 node_modules 加载第二份 dsh-llm 运行时实例
-      const message = {
-        id: 'bb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
-        role: 'user',
-        content: [{ type: 'text', text: line }],
-        source: { kind: 'plugin', plugin: 'dsh-bluebubbles' },
-      } as unknown as UserMessage
       // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
-      agent.send(message, 'next-step', true)
-      console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
+      if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
+        console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
+      }
     }
 
     // ================= 启动引导（一次性，无订阅可清理） =================
@@ -449,19 +404,7 @@ export default {
       // 这里自己再解析一遍，保证热重载后凭据不丢。
       let fileText: string | null = null
       if (state.password === '') {
-        for (const file of ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"']) {
-          try {
-            const spec = ctx.shell.resolve({ command: 'cat ' + file + ' 2>/dev/null', timeoutMs: 8000, stdoutMaxBytes: 32768 })
-            const run = await ctx.shell.run(spec)
-            if (run.exitCode === 0 && (run.stdout && run.stdout.text)) {
-              fileText = (run.stdout && run.stdout.text) || ''
-              console.log('bb: 已读取 ' + file)
-              break
-            }
-          } catch (err) {
-            console.log('bb: 读取 ' + file + ' 失败：' + (err instanceof Error ? err.message : err))
-          }
-        }
+        fileText = await readEnvFiles(ctx.shell, ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"'])
         if (fileText && state.password === '') {
           const pw = pickEnvValue(fileText, 'BLUEBUBBLES_PASSWORD')
           if (pw) {
