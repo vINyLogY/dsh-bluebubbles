@@ -282,7 +282,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok')
+      res.end('ok-v20')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -302,12 +302,16 @@ export default {
     // ---- 诊断面包屑（BLUEBUBBLES_DEBUG=1 时写入 $DSH_HOME/bluebubbles-debug.log）----
     let debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
     async function dbg(line: string): Promise<void> {
-      if (!debugEnabled) return
+      if (!debugEnabled || !fs) return
       try {
-        await ctx.shell.run(ctx.shell.resolve({
-          command: 'echo ' + shEscape(new Date().toISOString() + ' ' + line) + ' >> "$HOME/.dsh/bluebubbles-debug.log"',
-          timeoutMs: 8000,
-        }))
+        const path = dshHome + '/bluebubbles-debug.log'
+        let prev = ''
+        try {
+          prev = await fs.readText(await fs.resolve(path))
+        } catch {
+          // 文件不存在 = 从空开始
+        }
+        await fs.writeText(await fs.resolve(path), prev + new Date().toISOString() + ' ' + line + '\n')
       } catch {
         // 诊断失败不影响主流程
       }
