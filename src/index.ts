@@ -337,8 +337,8 @@ export default {
       return n + 'B'
     }
 
-    async function downloadAttachment(guid: string, name: string): Promise<string | null> {
-      const dir = dshHome + '/bluebubbles-media'
+    async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {
+      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
       const safe = (name.replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'attachment')
       const filePath = dir + '/' + guid + '-' + safe
       try {
@@ -409,7 +409,9 @@ export default {
         return
       }
 
-      // 附件：最多取前 3 个，下载到 $DSH_HOME/bluebubbles-media
+      // 附件：最多取前 3 个。存储位置就近绑定目标：
+      // 工作区绑定 → <workspacePath>/.bluebubbles-media；sessionId 直连 → $DSH_HOME/bluebubbles-media
+      const mediaDir = binding.workspacePath ? binding.workspacePath + '/.bluebubbles-media' : dshHome + '/bluebubbles-media'
       let attachmentBlock = ''
       if (attachments.length > 0) {
         const lines: string[] = []
@@ -418,7 +420,7 @@ export default {
           if (!att || typeof att.guid !== 'string') continue
           const name = typeof att.transferName === 'string' && att.transferName !== '' ? att.transferName : 'attachment'
           const meta = [att.mimeType, typeof att.totalBytes === 'number' ? fmtBytes(att.totalBytes) : null, att.width && att.height ? att.width + 'x' + att.height : null].filter(Boolean).join(', ')
-          const saved = await downloadAttachment(att.guid, name)
+          const saved = await downloadAttachment(att.guid, name, mediaDir)
           lines.push('- ' + name + (meta ? '（' + meta + '）' : '') + (saved ? ' → 已保存 ' + saved : ' → 下载失败'))
         }
         if (attachments.length > toFetch.length) lines.push('- …另有 ' + (attachments.length - toFetch.length) + ' 个附件')
@@ -584,19 +586,21 @@ export default {
       }),
       define({
         name: 'bluebubbles_get_attachment',
-        description: '按附件 GUID 下载 iMessage 附件（图片/文件）到 $DSH_HOME/bluebubbles-media/ 目录并返回本地路径。',
+        description: '按附件 GUID 下载 iMessage 附件（图片/文件）到指定目录（默认 $DSH_HOME/bluebubbles-media/）并返回本地路径。',
         parameters: {
           type: 'object',
           properties: {
             guid: { type: 'string', description: '附件 GUID（来自消息里的 attachments[].guid）' },
             name: { type: 'string', description: '保存时使用的文件名（默认 attachment）' },
+            dir: { type: 'string', description: '目标目录（默认 $DSH_HOME/bluebubbles-media/）' },
           },
           required: ['guid'],
         },
         execute: async (args) => {
           const guid = String(args.guid)
           const name = typeof args.name === 'string' && args.name !== '' ? args.name : 'attachment'
-          const path = await downloadAttachment(guid, name)
+          const dir = typeof args.dir === 'string' && args.dir !== '' ? args.dir : undefined
+          const path = await downloadAttachment(guid, name, dir)
           if (!path) return { ok: false, error: '下载失败（见日志）' }
           return { ok: true, guid, path }
         },
