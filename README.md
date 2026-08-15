@@ -52,15 +52,21 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-turn',
 - 注入内容只是文本消息，不会触发工具；发消息仍由模型显式调用 `bluebubbles_send_text`。
 - 与 OpenClaw 等其它 BlueBubbles 消费者互不干扰（webhook 是服务端广播）。
 
+## 技术栈
+
+- **TypeScript**（仅可擦除语法：无 enum/namespace/参数属性），类型来自真实的 `@deepseek-ai/dsh-*` devDependencies（与部署版本 0.1.0-rc.6 / cordis 4.0.1 对齐）。
+- **零构建**：Node ≥ 23.6 原生类型剥离，composition 行直接指向 `src/index.ts`；`npm run typecheck`（`tsc --noEmit`）做类型检查。
+- 初始化：`npm install --cache ./.npm-cache && npm run typecheck`。
+
 ## 平面归属与部署
 
 - 目标平面：**host composition**。本插件发布 `bluebubbles` 服务、注册 HTTP 路由、跨会话注入 agent，是进程级共享能力；若放入 agent preset，`ctx.provide('bluebubbles')` 会触发 "published process-global service" mount 审计拒绝（第二会话挂载即撞名）。
-- 加载方式：composition 行 `name: ./bluebubbles-dsh/src/index.js`（相对路径由 cordis-plugin-loader 直接解析，无需 npm 发布）。
+- 加载方式：composition 行 `name: /Users/you/ds-channel/bluebubbles-dsh/src/index.ts`（相对路径由 cordis-plugin-loader 直接解析，无需 npm 发布；Node 26 原生剥离 TS）。
 - 本包为 **Host-only**；Client（设置页）留待后续以 `dsh.client` 双面包形式接入（需要 checkout 的 web 构建管线）。
 
 ## 与动态插件的关系
 
-动态插件 `bubbl-1`（pkg-1/pkg-2，sandbox + harness API）是快速迭代载体；本仓库是持久化的真实插件移植版，稳定后作为 host composition 行挂载，重启不丢。
+动态插件 `bubbl-1`（pkg-1/pkg-2，sandbox + harness API，纯 JS）是快速迭代载体；本仓库是持久化的**真实插件 TS 移植版**（真实 Cordis API：`ctx.tools.register`、`webServer.register`、`agent.send`、`process.env`），稳定后作为 host composition 行挂载，重启不丢。两者 API 面不同，逻辑一一对应。
 
 ## 路线图
 
