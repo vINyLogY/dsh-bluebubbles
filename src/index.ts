@@ -436,18 +436,22 @@ export default {
       }),
       define({
         name: 'bluebubbles_bind',
-        description: '把 iMessage 会话绑定到 DSH 工作区：新消息将通过 webhook 投递为该工作区活跃会话的用户消息。',
+        description: '把 iMessage 会话绑定到 DSH 工作区或会话：新消息将通过 webhook 投递为目标会话的用户消息。workspacePath 与 sessionId 二选一（sessionId 更精确，workspacePath 解析到该工作区最新的会话）。',
         parameters: {
           type: 'object',
           properties: {
             chatGuid: { type: 'string', description: '会话 GUID（来自 bluebubbles_list_chats）' },
-            workspacePath: { type: 'string', description: '目标 DSH 工作区的目录路径' },
+            workspacePath: { type: 'string', description: '目标 DSH 工作区的目录路径（与 sessionId 二选一）' },
+            sessionId: { type: 'string', description: '目标 DSH 会话 ID（与 workspacePath 二选一，优先）' },
           },
-          required: ['chatGuid', 'workspacePath'],
+          required: ['chatGuid'],
         },
         execute: async (args) => {
+          const workspacePath = typeof args.workspacePath === 'string' && args.workspacePath.trim() !== '' ? args.workspacePath.trim() : null
+          const sessionId = typeof args.sessionId === 'string' && args.sessionId.trim() !== '' ? args.sessionId.trim() : null
+          if (!workspacePath && !sessionId) return { ok: false, error: 'workspacePath 与 sessionId 至少提供一个' }
           const key = 'chat:' + String(args.chatGuid)
-          state.bindings[key] = { workspacePath: String(args.workspacePath) }
+          state.bindings[key] = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
           await saveBindings()
           return { ok: true, key, binding: state.bindings[key], total: Object.keys(state.bindings).length }
         },
@@ -505,8 +509,9 @@ export default {
       listChats: (args: Record<string, unknown>) => listChats(args || {}),
       getMessages: (args: Record<string, unknown>) => getMessages(args || {}),
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
-      bind: (args: { chatGuid: string; workspacePath: string }) => {
-        state.bindings['chat:' + args.chatGuid] = { workspacePath: args.workspacePath }
+      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
+        const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
+        state.bindings['chat:' + args.chatGuid] = binding
         return saveBindings()
       },
       listBindings: () => state.bindings,
