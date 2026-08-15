@@ -20,6 +20,7 @@ interface FsService {
   resolve(path: string): Promise<FsTarget>
   readText(target: FsTarget): Promise<string>
   writeText(target: FsTarget, content: string): Promise<unknown>
+  stat?(target: FsTarget): Promise<unknown>
 }
 interface AgentsService {
   get(id: string): Agent | undefined
@@ -32,6 +33,7 @@ interface WebServerService {
 }
 interface TimerService {
   interval(callback: () => void, delay: number): () => void
+  timeout(callback: () => void, delay: number): () => void
 }
 
 function getService<T>(ctx: Context, name: string): T | undefined {
@@ -42,6 +44,7 @@ function getService<T>(ctx: Context, name: string): T | undefined {
 interface Binding {
   workspacePath?: string
   sessionId?: string
+  heartbeat?: boolean
 }
 
 // 从 dotenv 风格文本里提取 KEY=VALUE（支持 export 前缀、引号）
@@ -444,18 +447,33 @@ export default {
       console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
     }
 
-    // ================= 心跳（OpenClaw 兼容） =================
+    // ================= 心跳（OpenClaw 兼容，按绑定显式启用） =================
     const HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
+    async function hasHeartbeatFile(binding: Binding): Promise<boolean> {
+      if (!binding.workspacePath || !fs || typeof fs.stat !== 'function') return true // sessionId 直连：以 heartbeat 标志为准
+      try {
+        const target = await fs.resolve(binding.workspacePath + '/HEARTBEAT.md')
+        const info = await fs.stat(target)
+        return info !== undefined
+      } catch (err) {
+        return false
+      }
+    }
+
     async function heartbeatTick(): Promise<void> {
-      const entries = Object.entries(state.bindings)
-      if (entries.length === 0) return
-      for (const [key, binding] of entries) {
+      const enabled = Object.entries(state.bindings).filter(([, b]) => b && b.heartbeat === true)
+      if (enabled.length === 0) return
+      for (const [key, binding] of enabled) {
         try {
           const sessionId = await resolveSessionFor(binding)
           if (!sessionId) continue
           const agent = agents ? agents.get(sessionId) : undefined
           if (!agent) continue
+          if (!(await hasHeartbeatFile(binding))) {
+            console.log('bb: 心跳跳过（无 HEARTBEAT.md）：' + key)
+            continue
+          }
           const message = {
             id: 'bb-hb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
             role: 'user',
@@ -509,7 +527,8 @@ export default {
         console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），等待 bluebubbles_configure')
       }
 
-      // 心跳间隔：env → .env/.zshenv → 默认 12h
+      // 心跳：仅当存在 heartbeat:true 的绑定时才启动计时器；首触发锚定墙钟边界
+      const hbEnabled = Object.values(state.bindings).some((b) => b && b.heartbeat === true)
       let hbRaw = process.env.BLUEBUBBLES_HEARTBEAT_MS
       if (hbRaw === undefined && fileText) {
         const fromFile = pickEnvValue(fileText, 'BLUEBUBBLES_HEARTBEAT_MS')
@@ -518,9 +537,15 @@ export default {
       const hbNum = hbRaw !== undefined ? Number(hbRaw) : NaN
       const heartbeatMs = Number.isFinite(hbNum) && hbNum >= 60000 ? hbNum : 12 * 60 * 60 * 1000
       const timer = getService<TimerService>(ctx, 'timer')
-      if (timer) {
-        ctx.effect(() => timer.interval(() => { void heartbeatTick() }, heartbeatMs), 'heartbeat')
-        console.log('bb: 心跳已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h（BLUEBUBBLES_HEARTBEAT_MS 可调，最小 1 分钟）')
+      if (timer && hbEnabled) {
+        const firstDelay = heartbeatMs - (Date.now() % heartbeatMs)
+        ctx.effect(() => timer.timeout(() => {
+          void heartbeatTick()
+          timer.interval(() => { void heartbeatTick() }, heartbeatMs)
+        }, firstDelay), 'heartbeat')
+        console.log('bb: 心跳已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发（BLUEBUBBLES_HEARTBEAT_MS 可调，最小 1 分钟）')
+      } else if (!hbEnabled) {
+        console.log('bb: 心跳未启用（没有 heartbeat:true 的绑定）')
       } else {
         console.log('bb: timer 服务不可用，心跳禁用')
       }
@@ -663,6 +688,7 @@ export default {
             chatGuid: { type: 'string', description: '会话 GUID（来自 bluebubbles_list_chats）' },
             workspacePath: { type: 'string', description: '目标 DSH 工作区的目录路径（与 sessionId 二选一）' },
             sessionId: { type: 'string', description: '目标 DSH 会话 ID（与 workspacePath 二选一，优先）' },
+            heartbeat: { type: 'boolean', description: '为该绑定启用心跳：定时注入 HEARTBEAT 提示（工作区绑定还要求该工作区存在 HEARTBEAT.md）' },
           },
           required: ['chatGuid'],
         },
@@ -671,7 +697,9 @@ export default {
           const sessionId = typeof args.sessionId === 'string' && args.sessionId.trim() !== '' ? args.sessionId.trim() : null
           if (!workspacePath && !sessionId) return { ok: false, error: 'workspacePath 与 sessionId 至少提供一个' }
           const key = 'chat:' + String(args.chatGuid)
-          state.bindings[key] = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
+          const binding: Binding = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
+          if (args.heartbeat === true) binding.heartbeat = true
+          state.bindings[key] = binding
           await saveBindings()
           return { ok: true, key, binding: state.bindings[key], total: Object.keys(state.bindings).length }
         },
@@ -731,8 +759,9 @@ export default {
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
       sendAttachment: (args: Record<string, unknown>) => sendAttachment(args || {}),
       getAttachment: (args: { guid: string; name?: string }) => downloadAttachment(args.guid, args.name || 'attachment'),
-      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
+      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string; heartbeat?: boolean }) => {
         const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
+        if (args.heartbeat === true) binding.heartbeat = true
         state.bindings['chat:' + args.chatGuid] = binding
         return saveBindings()
       },
