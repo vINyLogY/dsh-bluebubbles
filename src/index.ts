@@ -330,11 +330,42 @@ export default {
       return null
     }
 
+    // ================= 附件下载（收图片） =================
+    function fmtBytes(n: number): string {
+      if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
+      if (n >= 1024) return Math.round(n / 1024) + 'KB'
+      return n + 'B'
+    }
+
+    async function downloadAttachment(guid: string, name: string): Promise<string | null> {
+      const dir = dshHome + '/bluebubbles-media'
+      const safe = (name.replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'attachment')
+      const filePath = dir + '/' + guid + '-' + safe
+      try {
+        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
+        const url = endpoint('attachment/' + encodeURIComponent(guid) + '/download')
+        const command = "curl -sS -f -m 60 -o '" + shEscape(filePath) + "' '" + shEscape(url) + "'"
+        const spec = ctx.shell.resolve({ command, timeoutMs: 70000, stdoutMaxBytes: 4096 } satisfies ShellExecRequest)
+        const run = await ctx.shell.run(spec)
+        if (run.exitCode !== 0) {
+          const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : '').trim()
+          console.log('bb: 附件下载失败 ' + guid + '：' + (detail || 'exit ' + run.exitCode))
+          return null
+        }
+        return filePath
+      } catch (err) {
+        console.log('bb: 附件下载异常 ' + guid + '：' + (err instanceof Error ? err.message : err))
+        return null
+      }
+    }
+
     async function processEvent(event: { type?: string; data?: any } | null): Promise<void> {
       if (!event || event.type !== 'new-message') return
       const m = event.data || {}
       const text = m.text
-      if (typeof text !== 'string' || text.trim() === '') return
+      const attachments: any[] = Array.isArray(m.attachments) ? m.attachments : []
+      const hasText = typeof text === 'string' && text.trim() !== ''
+      if (!hasText && attachments.length === 0) return
       if (m.isFromMe) return
       if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) return
       const guid = typeof m.guid === 'string' ? m.guid : null
@@ -378,7 +409,24 @@ export default {
         return
       }
 
-      const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + text
+      // 附件：最多取前 3 个，下载到 $DSH_HOME/bluebubbles-media
+      let attachmentBlock = ''
+      if (attachments.length > 0) {
+        const lines: string[] = []
+        const toFetch = attachments.slice(0, 3)
+        for (const att of toFetch) {
+          if (!att || typeof att.guid !== 'string') continue
+          const name = typeof att.transferName === 'string' && att.transferName !== '' ? att.transferName : 'attachment'
+          const meta = [att.mimeType, typeof att.totalBytes === 'number' ? fmtBytes(att.totalBytes) : null, att.width && att.height ? att.width + 'x' + att.height : null].filter(Boolean).join(', ')
+          const saved = await downloadAttachment(att.guid, name)
+          lines.push('- ' + name + (meta ? '（' + meta + '）' : '') + (saved ? ' → 已保存 ' + saved : ' → 下载失败'))
+        }
+        if (attachments.length > toFetch.length) lines.push('- …另有 ' + (attachments.length - toFetch.length) + ' 个附件')
+        attachmentBlock = '\n\n📎 附件：\n' + lines.join('\n')
+      }
+
+      const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
+      const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + body
       // 内联构造（MessageId 只是类型品牌）：避免从本仓库 node_modules 加载第二份 dsh-llm 运行时实例
       const message = {
         id: 'bb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
@@ -535,6 +583,25 @@ export default {
         execute: async (args) => await sendAttachment(args),
       }),
       define({
+        name: 'bluebubbles_get_attachment',
+        description: '按附件 GUID 下载 iMessage 附件（图片/文件）到 $DSH_HOME/bluebubbles-media/ 目录并返回本地路径。',
+        parameters: {
+          type: 'object',
+          properties: {
+            guid: { type: 'string', description: '附件 GUID（来自消息里的 attachments[].guid）' },
+            name: { type: 'string', description: '保存时使用的文件名（默认 attachment）' },
+          },
+          required: ['guid'],
+        },
+        execute: async (args) => {
+          const guid = String(args.guid)
+          const name = typeof args.name === 'string' && args.name !== '' ? args.name : 'attachment'
+          const path = await downloadAttachment(guid, name)
+          if (!path) return { ok: false, error: '下载失败（见日志）' }
+          return { ok: true, guid, path }
+        },
+      }),
+      define({
         name: 'bluebubbles_bind',
         description: '把 iMessage 会话绑定到 DSH 工作区或会话：新消息将通过 webhook 投递为目标会话的用户消息。workspacePath 与 sessionId 二选一（sessionId 更精确，workspacePath 解析到该工作区最新的会话）。',
         parameters: {
@@ -610,6 +677,7 @@ export default {
       getMessages: (args: Record<string, unknown>) => getMessages(args || {}),
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
       sendAttachment: (args: Record<string, unknown>) => sendAttachment(args || {}),
+      getAttachment: (args: { guid: string; name?: string }) => downloadAttachment(args.guid, args.name || 'attachment'),
       bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
         const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
         state.bindings['chat:' + args.chatGuid] = binding
