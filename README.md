@@ -38,13 +38,46 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-turn',
 
 ## 配置
 
-| 环境变量 | 说明 |
-| --- | --- |
-| `BLUEBUBBLES_PASSWORD` | 服务器密码（优先）；DSH 进程启动早于变量写入时，回退读取 `~/.zshenv` |
-| `BLUEBUBBLES_BASE_URL` | 服务器地址，默认 `http://localhost:1234` |
-| `BLUEBUBBLES_BINDINGS` | 绑定表文件路径，默认 `~/.dsh/bluebubbles-bindings.json` |
+### 1. 服务器地址与密码（三选一，按优先级）
 
-仓库里不含任何密钥。
+| 方式 | 设置方法 | 生效时机 |
+| --- | --- | --- |
+| `bluebubbles_configure` 工具 | 让模型调用：`{"baseUrl": "…", "password": "…"}` | 立即生效，仅存内存；插件重载/DSH 重启后回落到下面两种 |
+| 环境变量 | 启动 DSH 前 `export BLUEBUBBLES_PASSWORD=…`（可加 `BLUEBUBBLES_BASE_URL`） | DSH 重启后生效（进程 env 在启动时固化） |
+| `~/.zshenv` | 写一行 `export BLUEBUBBLES_PASSWORD=…` | 插件挂载/热重载时读取：改完保存 patch 文件（或重启 DSH）即生效 |
+
+- 默认地址 `http://localhost:1234`（BlueBubbles 服务器默认端口）。
+- 仓库与 patch 文件不含密钥。
+- 验证：`bluebubbles_ping` 返回 `ok:true` + 延迟。
+
+### 2. Webhook 推送（自动，无需手配）
+
+- 插件启动（或 `configure` 成功）后自动向 BlueBubbles 注册 `POST http://127.0.0.1:3080/bluebubbles/webhook`（事件 `new-message`），幂等。
+- 检查：`bluebubbles_webhook_status`；或在 BlueBubbles 服务器设置 → Webhooks 里应看到该 URL 一行。
+- 端口：DSH 的 web 端口改变时，需同步修改 `src/index.ts` 里的 `WEBHOOK_URL`。
+
+### 3. 会话绑定（决定消息投递到哪）
+
+| 工具 | 示例参数 |
+| --- | --- |
+| `bluebubbles_list_chats` | `{}` 或 `{"limit": 50}` —— 拿到每个会话的 `chatGuid` |
+| `bluebubbles_bind` | `{"chatGuid": "any;-;+<phone>", "sessionId": "session-…"}` 或 `{"chatGuid": "…", "workspacePath": "/Users/you/ds-channel"}` |
+| `bluebubbles_unbind` | `{"chatGuid": "…"}` |
+| `bluebubbles_list_bindings` | `{}` |
+
+- `sessionId`（精确）与 `workspacePath`（解析到该工作区最新会话）二选一；会话 ID 在 DSH 会话内可用 `echo $DSH_SESSION_ID` 查看。
+- 绑定表持久化于 `~/.dsh/bluebubbles-bindings.json`（可用 `BLUEBUBBLES_BINDINGS` 覆盖路径），插件重载/重启后自动恢复。
+- 未绑定的会话消息只会记日志，不会打扰任何工作区。
+
+### 4. 更新代码
+
+1. 修改 `src/index.ts` → `npm run typecheck` → `git commit`
+2. 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，把 `?v=N` 递增一位并保存
+3. 文件监视器热重载，无需重启 DSH；用 `bluebubbles_ping` 确认。
+
+### 5. 端到端测试
+
+绑定一个会话 → 从手机给 Mac 的 iMessage 账号发消息 → 几秒内消息以用户回合出现在目标会话。注意：其它 BlueBubbles 消费者（如 OpenClaw）会同时响应，属正常现象；本插件只处理已绑定会话的入站消息。
 
 ## 安全
 
