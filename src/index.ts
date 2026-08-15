@@ -10,7 +10,6 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -200,18 +199,21 @@ export default {
     async function ensureWebhook(): Promise<Record<string, unknown>> {
       if (!webServer) return { ok: false, registered: false, error: 'webServer 服务不可用，无法接收推送' }
       if (state.password === '') return { ok: false, registered: false, error: '尚未配置 BlueBubbles 密码' }
+      // 幂等：先查后建，不依赖服务端对重复 URL 的去重行为
+      const list = await curl('GET', 'webhook', null)
+      const existing = list.ok && Array.isArray(list.data) ? list.data.find((w: any) => w && w.url === WEBHOOK_URL) : null
+      if (existing) return { ok: true, registered: true, id: existing.id, url: WEBHOOK_URL, note: '已存在' }
       const created = await curl('POST', 'webhook', { url: WEBHOOK_URL, events: ['new-message'] })
       if (created.ok) {
         const data = created.data as any
         return { ok: true, registered: true, id: data && data.id ? data.id : null, url: WEBHOOK_URL }
       }
-      const list = await curl('GET', 'webhook', null)
-      const found = list.ok && Array.isArray(list.data) ? list.data.find((w: any) => w && w.url === WEBHOOK_URL) : null
-      if (found) return { ok: true, registered: true, id: found.id, url: WEBHOOK_URL, note: '已存在' }
       return { ok: false, registered: false, error: created.error }
     }
 
-    // ================= webhook：HTTP 路由 =================
+    // ================= webhook 事件处理（含消息级去重） =================
+    const seenGuids = new Set<string>()
+    const SEEN_GUIDS_MAX = 500
     function readBody(req: IncomingMessage): Promise<string> {
       return new Promise((resolve, reject) => {
         let size = 0
@@ -278,6 +280,15 @@ export default {
       if (typeof text !== 'string' || text.trim() === '') return
       if (m.isFromMe) return
       if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) return
+      const guid = typeof m.guid === 'string' ? m.guid : null
+      if (guid) {
+        if (seenGuids.has(guid)) return
+        seenGuids.add(guid)
+        if (seenGuids.size > SEEN_GUIDS_MAX) {
+          const oldest = seenGuids.values().next()
+          if (!oldest.done) seenGuids.delete(oldest.value)
+        }
+      }
 
       const chat = (Array.isArray(m.chats) && m.chats[0]) || null
       const chatGuid: string | null = chat ? chat.guid : null
@@ -311,10 +322,13 @@ export default {
       }
 
       const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + text
-      const message: UserMessage = createUserMessage({
+      // 内联构造（MessageId 只是类型品牌）：避免从本仓库 node_modules 加载第二份 dsh-llm 运行时实例
+      const message = {
+        id: 'bb-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
+        role: 'user',
         content: [{ type: 'text', text: line }],
         source: { kind: 'plugin', plugin: 'dsh-bluebubbles' },
-      })
+      } as unknown as UserMessage
       agent.send(message, 'next-turn', true)
       console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
     }
@@ -387,7 +401,8 @@ export default {
         execute: async (args) => {
           const applied = applyConfig(args)
           const check = await ping()
-          return { ok: true, baseUrl: applied.baseUrl, hasPassword: applied.hasPassword, connection: check }
+          const webhook = check.ok ? await ensureWebhook() : null
+          return { ok: true, baseUrl: applied.baseUrl, hasPassword: applied.hasPassword, connection: check, webhook }
         },
       }),
       define({
