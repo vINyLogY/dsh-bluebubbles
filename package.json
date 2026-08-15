@@ -1,0 +1,15 @@
+{
+  "name": "dsh-bluebubbles",
+  "version": "0.1.0",
+  "description": "BlueBubbles (iMessage) bridge plugin for DeepSeek Harness: REST tools + webhook push routed into bound workspaces.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
