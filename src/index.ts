@@ -41,6 +41,14 @@ interface Binding {
   sessionId?: string
 }
 
+// 从 dotenv 风格文本里提取 KEY=VALUE（支持 export 前缀、引号）
+function pickEnvValue(text: string, name: string): string | null {
+  const re = new RegExp('(?:^|\\n)\\s*(?:export\\s+)?' + name + '=(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\']+))', 'm')
+  const m = re.exec(text)
+  if (!m) return null
+  return (m[1] || m[2] || m[3] || '').trim()
+}
+
 export default {
   inject: ['tools', 'shell'],
   apply(ctx: Context) {
@@ -92,7 +100,7 @@ export default {
         return { ok: false, error: '无法解析 BlueBubbles 响应：' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
       }
       if (parsed && typeof parsed.status === 'number' && parsed.status >= 400) {
-        const detail = parsed.error ? (parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
+        const detail = parsed.error ? (parsed.error.message || parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
         return { ok: false, error: detail }
       }
       const hasData = parsed && Object.prototype.hasOwnProperty.call(parsed, 'data')
@@ -122,7 +130,7 @@ export default {
         return { ok: false, error: '无法解析 BlueBubbles 响应：' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
       }
       if (parsed && typeof parsed.status === 'number' && parsed.status >= 400) {
-        const detail = parsed.error ? (parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
+        const detail = parsed.error ? (parsed.error.message || parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
         return { ok: false, error: detail }
       }
       const hasData = parsed && Object.prototype.hasOwnProperty.call(parsed, 'data')
@@ -379,17 +387,30 @@ export default {
 
     // ================= 启动引导（一次性，无订阅可清理） =================
     const bootstrap = async () => {
+      // 凭据链：process.env → ~/.dsh/.env → ~/.zshenv。
+      // 注意 .env 只在进程启动时由 DSH 注入，热重载不会重读；
+      // 这里自己再解析一遍，保证热重载后凭据不丢。
       if (state.password === '') {
-        try {
-          const spec = ctx.shell.resolve({ command: 'cat "$HOME/.zshenv" 2>/dev/null', timeoutMs: 8000, stdoutMaxBytes: 32768 })
-          const run = await ctx.shell.run(spec)
-          if (run.exitCode === 0) {
-            const text = (run.stdout && run.stdout.text) || ''
-            const m = /(?:^|\n)\s*(?:export\s+)?BLUEBUBBLES_PASSWORD=(?:"([^"]*)"|'([^']*)'|([^\s"']+))/m.exec(text)
-            if (m) state.password = (m[1] || m[2] || m[3] || '').trim()
+        for (const file of ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"']) {
+          try {
+            const spec = ctx.shell.resolve({ command: 'cat ' + file + ' 2>/dev/null', timeoutMs: 8000, stdoutMaxBytes: 32768 })
+            const run = await ctx.shell.run(spec)
+            if (run.exitCode === 0) {
+              const text = (run.stdout && run.stdout.text) || ''
+              const pw = pickEnvValue(text, 'BLUEBUBBLES_PASSWORD')
+              if (pw) {
+                state.password = pw
+                if (state.baseUrl === 'http://localhost:1234') {
+                  const url = pickEnvValue(text, 'BLUEBUBBLES_BASE_URL')
+                  if (url) state.baseUrl = url
+                }
+                console.log('bb: 凭据已从 ' + file + ' 载入')
+                break
+              }
+            }
+          } catch (err) {
+            console.log('bb: 读取 ' + file + ' 失败：' + (err instanceof Error ? err.message : err))
           }
-        } catch (err) {
-          console.log('bb: 读取 ~/.zshenv 失败：' + (err instanceof Error ? err.message : err))
         }
       }
       await loadBindings()
@@ -397,7 +418,7 @@ export default {
         const wh = await ensureWebhook()
         console.log('bb: 凭据就绪（' + state.baseUrl + '），webhook 注册：' + JSON.stringify(wh))
       } else {
-        console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env 与 ~/.zshenv），等待 bluebubbles_configure')
+        console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），等待 bluebubbles_configure')
       }
     }
     void bootstrap()
