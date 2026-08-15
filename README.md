@@ -79,13 +79,50 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 
 ### 4. 更新代码
 
-1. 修改 `src/index.ts` → `npm run typecheck` → `git commit`
-2. 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，把 `?v=N` 递增一位并保存
+1. 修改 `src/*.ts` → `npm run typecheck` → `git commit`
+2. 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，把对应行的 `?v=N` 递增一位并保存
 3. 文件监视器热重载，无需重启 DSH；用 `bluebubbles_ping` 确认。
 
 ### 5. 端到端测试
 
 绑定一个会话 → 从手机给 Mac 的 iMessage 账号发消息 → 几秒内消息以用户回合出现在目标会话。注意：其它 BlueBubbles 消费者（如 OpenClaw）会同时响应，属正常现象；本插件只处理已绑定会话的入站消息。
+
+## 路径总览
+
+### 环境与凭据（读取链：`process.env` → `$DSH_HOME/.env` → `~/.zshenv`）
+
+| 键 | 含义 | 默认 |
+| --- | --- | --- |
+| `DSH_HOME` | 所有 DSH 路径的根 | `~/.dsh` |
+| `BLUEBUBBLES_PASSWORD` | BlueBubbles 服务器密码 | 无（必需） |
+| `BLUEBUBBLES_BASE_URL` | 服务器地址 | `http://localhost:1234` |
+| `BLUEBUBBLES_HEARTBEAT_INTERVAL` | 心跳间隔（`30m`/`2h`/`12h`，裸数字=小时，下限 1 分钟） | `12h` |
+| `BLUEBUBBLES_BINDINGS` | 绑定表路径覆盖 | `$DSH_HOME/bluebubbles-bindings.json` |
+| `BLUEBUBBLES_HEARTBEAT_TARGETS` | 心跳目标路径覆盖 | `$DSH_HOME/heartbeat-targets.json` |
+
+### 绑定相关（重点）
+
+| 路径 | 内容 | 所有者 | 读写时机 | 写失败 |
+| --- | --- | --- | --- | --- |
+| `$DSH_HOME/bluebubbles-bindings.json` | `{ "chat:<guid>": { workspacePath \| sessionId } }` | bridge | 启动载入；bind/unbind 每次变更写盘 | 降级内存态（日志提示） |
+| `$DSH_HOME/heartbeat-targets.json` | `{ "标签": { workspacePath \| sessionId, heartbeatMd? } }` | dsh-heartbeat | 启动只读；改文件后热重载生效 | 读不到 = 心跳未启用 |
+| `<workspacePath>/.bluebubbles-media/` | 工作区绑定收到的附件 | bridge | 收附件时 `mkdir -p` + 下载 | 下载失败记日志，消息仍投递 |
+| `$DSH_HOME/bluebubbles-media/` | sessionId 绑定 / 手动下载的附件 | bridge | 同上 | 同上 |
+| `<目标工作区>/HEARTBEAT.md` | 心跳提示引用的自查清单（agent 自读，插件不读） | 用户/agent | — | — |
+
+**会话解析链**（`lib.resolveSession`）：`sessionId` 直连（精确，无 fallback）→ 否则 `workspacePath` → 该工作区 `sessionIds[0]`（最新会话）→ `agents.get` 校验活跃 → 无活跃 agent 则丢弃并记日志（不回退到次新会话、不排队补投）。
+
+**媒体文件名**：`<附件guid>-<清洗后的transferName>`（非法字符替换为 `_`，最长 80 字符）。
+
+### 部署与远端
+
+| 路径 | 说明 |
+| --- | --- |
+| `$DSH_HOME/profiles/web/cordis.patch.yml` | host 合成 patch 层：`bluebubbles-bridge`（`src/index.ts?v=N`）+ `dsh-heartbeat`（`src/heartbeat.ts?v=N`），保存即热重载 |
+| `/Users/you/ds-channel/bluebubbles-dsh/` | 插件源码仓库（`src/index.ts`、`src/heartbeat.ts`、`src/lib.ts`） |
+| `http://127.0.0.1:3080/bluebubbles/webhook` | 本机回环 webhook 入口（BlueBubbles 服务器上注册为 id 10，事件 `new-message`） |
+| `http://localhost:1234/api/v1/*?password=…` | BlueBubbles REST（插件经 shell+curl 调用） |
+| `$DSH_HOME/storages/workspace.json` | 工作区注册表（`sessionIds` 顺序 = 会话解析依据；由 GUI 维护） |
 
 ## 安全
 
