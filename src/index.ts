@@ -57,11 +57,13 @@ export default {
     const fs = getService<FsService>(ctx, 'fs')
     const workspaces = getService<WorkspaceRegistryService>(ctx, 'workspaceRegistry')
 
+    const dshHome = (process.env.DSH_HOME || process.env.HOME + '/.dsh') as string
+
     const state = {
       baseUrl: (process.env.BLUEBUBBLES_BASE_URL || 'http://localhost:1234') as string,
       password: (process.env.BLUEBUBBLES_PASSWORD || '') as string,
       bindings: {} as Record<string, Binding>,
-      bindingsPath: (process.env.BLUEBUBBLES_BINDINGS || process.env.HOME + '/.dsh/bluebubbles-bindings.json') as string,
+      bindingsPath: (process.env.BLUEBUBBLES_BINDINGS || dshHome + '/bluebubbles-bindings.json') as string,
     }
 
     // ================= HTTP 辅助（经 shell 跑 curl：web 服务只支持 GET） =================
@@ -238,7 +240,9 @@ export default {
     async function saveBindings(): Promise<void> {
       if (!fs) return
       try {
-        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "$HOME/.dsh"', timeoutMs: 8000 }))
+        // shell 执行器会丢弃环境里的 DSH_* 托管变量，这里用 JS 侧算好的目录
+        const dir = state.bindingsPath.replace(/\/[^/]*$/, '')
+        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
         const target = await fs.resolve(state.bindingsPath)
         await fs.writeText(target, JSON.stringify(state.bindings, null, 2))
       } catch (err) {

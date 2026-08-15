@@ -34,7 +34,7 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-turn',
 
 - 防回环：`isFromMe` 或 `tempGuid` 以 `dsh-` 开头的消息不回灌。
 - 未绑定的会话：忽略并记日志。
-- 绑定表持久化：`~/.dsh/bluebubbles-bindings.json`（写失败时降级为内存态）。
+- 绑定表持久化：`$DSH_HOME/bluebubbles-bindings.json`（默认 `~/.dsh`；写失败时降级为内存态）。
 
 ## 配置
 
@@ -66,7 +66,7 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-turn',
 | `bluebubbles_list_bindings` | `{}` |
 
 - `sessionId`（精确）与 `workspacePath`（解析到该工作区最新会话）二选一；会话 ID 在 DSH 会话内可用 `echo $DSH_SESSION_ID` 查看。
-- 绑定表持久化于 `~/.dsh/bluebubbles-bindings.json`（可用 `BLUEBUBBLES_BINDINGS` 覆盖路径），插件重载/重启后自动恢复。
+- 绑定表持久化于 `$DSH_HOME/bluebubbles-bindings.json`（默认 `~/.dsh`；可用 `BLUEBUBBLES_BINDINGS` 覆盖路径），插件重载/重启后自动恢复。
 - 未绑定的会话消息只会记日志，不会打扰任何工作区。
 
 ### 4. 更新代码
