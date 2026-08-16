@@ -126,7 +126,7 @@ const HELP = `bb-channel — BlueBubbles (iMessage) CLI
   send <chatGuid> <文本...>             发文本（--method private-api 可选）
   send-attachment <chatGuid> <文件> [--name X]   发附件（默认 private-api）
   attachment <guid> [--name X] [--dir D]       下载附件（默认存 $DSH_HOME/bluebubbles-media）
-  bind <chatGuid> (--workspace PATH | --session ID)   绑定会话到 DSH 工作区/会话
+  bind <chatGuid> (--workspace PATH | --session ID) [--relay] [--no-typing]   绑定会话到 DSH 工作区/会话
   unbind <chatGuid>                     解绑
   bindings                              查看绑定表
   contacts                              查看通讯录（地址 → 显示名）
@@ -254,10 +254,14 @@ async function main() {
       const workspace = argValue(rest, '--workspace')
       const session = argValue(rest, '--session')
       if (!workspace && !session) die('bind 需要 --workspace PATH 或 --session ID')
+      const binding = session ? { sessionId: session } : { workspacePath: workspace }
+      // --relay：iMessage 触发的回合自动把文本回复投递回来；--no-typing：关「正在输入」指示（缺省开）
+      if (hasFlag(rest, '--relay')) binding.relay = true
+      if (hasFlag(rest, '--no-typing')) binding.typing = false
       const bindings = readJson(BINDINGS_PATH, {})
-      bindings['chat:' + chatGuid] = session ? { sessionId: session } : { workspacePath: workspace }
+      bindings['chat:' + chatGuid] = binding
       writeJson(BINDINGS_PATH, bindings)
-      out({ ok: true, key: 'chat:' + chatGuid, binding: bindings['chat:' + chatGuid], note: '插件在下一条入站消息时热生效' })
+      out({ ok: true, key: 'chat:' + chatGuid, binding, note: '插件在下一条入站消息时热生效' })
       return
     }
 

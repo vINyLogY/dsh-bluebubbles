@@ -21,6 +21,10 @@ interface WebServerService {
 interface Binding {
   workspacePath?: string
   sessionId?: string
+  /** iMessage 触发的回合：自动把 assistant 文本回复投递回该 iMessage 会话（免工具约定） */
+  relay?: boolean
+  /** iMessage 触发的回合：工作期间向对方显示「正在输入」（缺省开） */
+  typing?: boolean
 }
 
 export default {
@@ -475,10 +479,71 @@ export default {
       const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + fromPart + '\n' + body
       // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
+        // 登记 iMessage 触发的回合：typing 指示（缺省开）与回复自动投递（relay: true 时）
+        if (chatGuid) {
+          inboundTriggers.set(sessionId, {
+            chatGuid,
+            relay: binding.relay === true,
+            typing: binding.typing !== false,
+            lastTypingAt: 0,
+          })
+          if (binding.typing !== false) void sendTyping(chatGuid)
+        }
         await dbg('delivered session=' + sessionId)
         console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
       }
     }
+
+    // ================= iMessage 触发回合的人体工学（typing 指示 + 回复自动投递） =================
+    // 语义：注入 iMessage 时登记触发；该会话随后的回合视为"在回复这条 iMessage"——
+    // typing 让对方看到「正在输入」；relay 开启时第一个含文本的 assistant 消息自动发回
+    // （经 sendText，自带 noteSent 防环），随后触发清除；回合结束未产出文本也清除，防串台。
+    const inboundTriggers = new Map<string, { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number }>()
+
+    async function sendTyping(chatGuid: string): Promise<void> {
+      try {
+        await curl('POST', 'chat/' + encodeURIComponent(chatGuid) + '/typing', {})
+      } catch {
+        // typing 指示是纯装饰，失败忽略
+      }
+    }
+
+    function assistantTextOf(event: { data?: any }): string {
+      const message = event.data && event.data.message
+      const content = message && Array.isArray(message.content) ? message.content : []
+      const texts: string[] = []
+      for (const part of content) {
+        if (part && part.type === 'text' && typeof part.text === 'string') texts.push(part.text)
+      }
+      return texts.join('\n').trim()
+    }
+
+    ctx.on('session/event', (session: { id?: string }, event: { type?: string; data?: any }) => {
+      try {
+        const sessionId = session && session.id
+        if (!sessionId || !event || typeof event.type !== 'string') return
+        const trigger = inboundTriggers.get(sessionId)
+        if (!trigger) return
+        if (event.type === 'turn/start' || event.type === 'step/start') {
+          if (!trigger.typing) return
+          const now = Date.now()
+          if (now - trigger.lastTypingAt < 8000) return // 指示会过期，按 8s 节流续命
+          trigger.lastTypingAt = now
+          void sendTyping(trigger.chatGuid)
+          return
+        }
+        if (event.type === 'assistant/message' && trigger.relay) {
+          const reply = assistantTextOf(event)
+          if (reply === '') return // 纯工具调用步，等后续文本
+          inboundTriggers.delete(sessionId)
+          void sendText({ chatGuid: trigger.chatGuid, text: reply }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
+          return
+        }
+        if (event.type === 'turn/end') inboundTriggers.delete(sessionId)
+      } catch {
+        // 事件监听器绝不许影响会话事件流
+      }
+    })
 
     // ================= 启动引导（带重试：fiber 激活早期 shell 可能未就绪） =================
     const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
