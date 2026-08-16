@@ -326,7 +326,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v24')
+      res.end('ok-v25')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
