@@ -170,6 +170,7 @@ export default {
     async function sendText(args: Record<string, unknown>): Promise<Record<string, unknown>> {
       const tempGuid = 'dsh-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
       const method = args.method === 'private-api' ? 'private-api' : 'apple-script'
+      noteSent(String(args.chatGuid), String(args.text))
       const result = await curl('POST', 'message/text', {
         chatGuid: String(args.chatGuid),
         tempGuid,
@@ -177,7 +178,9 @@ export default {
         method,
       })
       if (!result.ok) return result
-      return { ok: true, tempGuid, guid: result.data && (result.data as any).guid ? (result.data as any).guid : null, text: result.data && (result.data as any).text ? (result.data as any).text : null }
+      const sentGuid = result.data && (result.data as any).guid ? (result.data as any).guid : null
+      if (sentGuid) seenGuids.add(sentGuid)
+      return { ok: true, tempGuid, guid: sentGuid, text: result.data && (result.data as any).text ? (result.data as any).text : null }
     }
 
     async function sendAttachment(args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -185,6 +188,7 @@ export default {
       const tempGuid = 'dsh-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
       const name = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : (filePath.split('/').pop() || 'attachment')
       const method = args.method === 'apple-script' ? 'apple-script' : 'private-api'
+      noteSent(String(args.chatGuid), '')
       const result = await curlMultipart('message/attachment', {
         chatGuid: String(args.chatGuid),
         tempGuid,
@@ -192,7 +196,9 @@ export default {
         name,
       }, filePath, name)
       if (!result.ok) return result
-      return { ok: true, tempGuid, name, guid: result.data && (result.data as any).guid ? (result.data as any).guid : null }
+      const sentGuid = result.data && (result.data as any).guid ? (result.data as any).guid : null
+      if (sentGuid) seenGuids.add(sentGuid)
+      return { ok: true, tempGuid, name, guid: sentGuid }
     }
 
     // ================= 绑定表持久化 =================
@@ -245,6 +251,27 @@ export default {
     // ================= webhook 事件处理（含消息级去重） =================
     const seenGuids = new Set<string>()
     const SEEN_GUIDS_MAX = 500
+    // 防自循环：发送前登记待发（chat+text），webhook 回显 isFromMe 消息时按此匹配丢弃。
+    // BlueBubbles webhook 不回显 tempGuid，故 tempGuid 过滤不足以防环；此处为主防线。
+    const pendingSent: Array<{ chat: string; text: string; at: number }> = []
+    const PENDING_TTL = 60000
+    function noteSent(chat: string, text: string): void {
+      pendingSent.push({ chat, text, at: Date.now() })
+      if (pendingSent.length > 100) pendingSent.splice(0, pendingSent.length - 100)
+    }
+    function matchPending(chat: string | null, text: string): boolean {
+      const now = Date.now()
+      while (pendingSent.length > 0 && now - pendingSent[0].at > PENDING_TTL) pendingSent.shift()
+      if (!chat) return false
+      for (let i = pendingSent.length - 1; i >= 0; i--) {
+        const p = pendingSent[i]
+        if (p.chat === chat && p.text === text) {
+          pendingSent.splice(i, 1)
+          return true
+        }
+      }
+      return false
+    }
     function readBody(req: IncomingMessage): Promise<string> {
       return new Promise((resolve, reject) => {
         let size = 0
@@ -282,7 +309,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v20')
+      res.end('ok-v22')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -346,7 +373,13 @@ export default {
       const hasText = typeof text === 'string' && text.trim() !== ''
       await dbg('event guid=' + (m.guid || '?') + ' isFromMe=' + m.isFromMe + ' sender=' + (m.handle && m.handle.address || '?') + ' tempGuid=' + (m.tempGuid || '?') + ' chats0=' + ((Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || '?') + ' text=' + String(text || '').slice(0, 40))
       if (!hasText && attachments.length === 0) { await dbg('drop:empty text&atts'); return }
-      if (m.isFromMe) { await dbg('drop:isFromMe'); return }
+      if (m.isFromMe) {
+        // 自己账号发出的消息：匹配待发队列则为本桥所发（丢弃防环）；
+        // 否则是用户从手机/Mac 亲手发的（自聊会话里手机消息也是 isFromMe=true），放行。
+        const chat0 = (Array.isArray(m.chats) && m.chats[0]) || null
+        if (matchPending(chat0 ? chat0.guid : null, typeof text === 'string' ? text : '')) { await dbg('drop:pendingSent'); return }
+        await dbg('note:isFromMe passthrough')
+      }
       if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) { await dbg('drop:tempGuid'); return }
       const guid = typeof m.guid === 'string' ? m.guid : null
       if (guid) {
