@@ -38,6 +38,8 @@ export default {
       password: (process.env.BLUEBUBBLES_PASSWORD || '') as string,
       bindings: {} as Record<string, Binding>,
       bindingsPath: (process.env.BLUEBUBBLES_BINDINGS || dshHome + '/bluebubbles-bindings.json') as string,
+      contacts: {} as Record<string, string>,
+      contactsPath: (process.env.BLUEBUBBLES_CONTACTS || dshHome + '/bluebubbles-contacts.json') as string,
     }
 
     // ================= HTTP 辅助（经 shell 跑 curl：web 服务只支持 GET） =================
@@ -201,20 +203,28 @@ export default {
       return { ok: true, tempGuid, name, guid: sentGuid }
     }
 
-    // ================= 绑定表持久化 =================
-    async function loadBindings(): Promise<void> {
-      if (!fs) return
+    // ================= 状态文件（绑定表 + 通讯录） =================
+    // 两者都由 bb-channel CLI 直接编辑，插件在每条入站消息前重读，天然热更新。
+    async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
+      if (!fs) return null
       try {
-        const target = await fs.resolve(state.bindingsPath)
-        const text = await fs.readText(target)
-        const parsed: unknown = JSON.parse(text)
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          state.bindings = parsed as Record<string, Binding>
-          console.log('bb: 已载入绑定表（' + Object.keys(parsed).length + ' 条）')
-        }
-      } catch (err) {
-        console.log('bb: 绑定表载入跳过：' + (err instanceof Error ? err.message : err))
+        const target = await fs.resolve(path)
+        const parsed: unknown = JSON.parse(await fs.readText(target))
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+      } catch {
+        // 文件不存在或损坏 = 视为空
       }
+      return null
+    }
+
+    async function reloadStateFiles(log: boolean): Promise<void> {
+      const b = await readJsonFile(state.bindingsPath)
+      if (b) {
+        state.bindings = b as unknown as Record<string, Binding>
+        if (log) console.log('bb: 已载入绑定表（' + Object.keys(b).length + ' 条）')
+      }
+      const c = await readJsonFile(state.contactsPath)
+      if (c) state.contacts = c as Record<string, string>
     }
 
     async function saveBindings(): Promise<void> {
@@ -312,7 +322,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v23')
+      res.end('ok-v24')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -405,6 +415,9 @@ export default {
       const sender: string | null = (m.handle && m.handle.address) || null
       const chatName: string = chat ? (chat.displayName || '') : ''
 
+      // 每条消息前热重读绑定表/通讯录（CLI 可能刚改过）
+      await reloadStateFiles(false)
+
       const keys: string[] = []
       if (chatGuid) keys.push('chat:' + chatGuid)
       if (sender) keys.push('addr:' + sender)
@@ -451,8 +464,15 @@ export default {
         attachmentBlock = '\n\n📎 附件：\n' + lines.join('\n')
       }
 
+      // 发送者显示名：payload 自带 → 本地通讯录（~/.dsh/bluebubbles-contacts.json）→ 裸地址
+      const handleObj = (m.handle && typeof m.handle === 'object') ? m.handle : {}
+      const senderName: string | null =
+        (typeof handleObj.displayName === 'string' && handleObj.displayName !== '' ? handleObj.displayName : null)
+        || (sender && state.contacts[sender]) || null
+      const fromPart = sender ? ' · 来自 ' + (senderName ? senderName + '（' + sender + '）' : sender) : ''
+
       const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
-      const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + (sender ? ' · 来自 ' + sender : '') + '\n' + body
+      const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + fromPart + '\n' + body
       // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
         await dbg('delivered session=' + sessionId)
@@ -460,8 +480,9 @@ export default {
       }
     }
 
-    // ================= 启动引导（一次性，无订阅可清理） =================
-    const bootstrap = async () => {
+    // ================= 启动引导（带重试：fiber 激活早期 shell 可能未就绪） =================
+    const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+    const bootstrapOnce = async (): Promise<void> => {
       // 凭据链：process.env → ~/.dsh/.env → ~/.zshenv。
       // 注意 .env 只在进程启动时由 DSH 注入，热重载不会重读；
       // 这里自己再解析一遍，保证热重载后凭据不丢。
@@ -480,16 +501,30 @@ export default {
         }
         if (!debugEnabled && fileText) debugEnabled = pickEnvValue(fileText, 'BLUEBUBBLES_DEBUG') === '1'
       }
-      await loadBindings()
+      await reloadStateFiles(true)
       if (state.password !== '') {
         const wh = await ensureWebhook()
         console.log('bb: 凭据就绪（' + state.baseUrl + '），webhook 注册：' + JSON.stringify(wh))
       } else {
-        console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），等待 bluebubbles_configure')
+        console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），可用 bb-channel configure 写入 ~/.dsh/.env')
       }
     }
+    const bootstrap = async (): Promise<void> => {
+      const maxAttempts = 10
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          await bootstrapOnce()
+          return
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.log('bb: 启动引导第 ' + attempt + '/' + maxAttempts + ' 次失败：' + msg)
+          if (attempt < maxAttempts) await sleep(3000)
+        }
+      }
+      console.log('bb: 启动引导最终失败（已重试 ' + 10 + ' 次），凭据/ webhook 需人工检查')
+    }
     void bootstrap().catch((err: unknown) => {
-      console.log('bb: 启动引导失败：' + (err instanceof Error ? err.message : err))
+      console.log('bb: 启动引导异常：' + (err instanceof Error ? err.message : err))
     })
 
     // ================= 工具定义与注册 =================
@@ -521,57 +556,12 @@ export default {
       } as unknown as ToolDefinition
     }
 
+    // 模型工具只保留「发」——其余操作（列会话/读消息/绑定/配置/webhook）
+    // 全部走 bb-channel CLI（bash 调用），见 README 与工作区 TOOLS.md。
     const tools: ToolDefinition[] = [
       define({
-        name: 'bluebubbles_configure',
-        description: '配置本地 BlueBubbles 服务器连接（base URL 与密码）。默认 baseUrl 为 http://localhost:1234。',
-        parameters: {
-          type: 'object',
-          properties: {
-            baseUrl: { type: 'string', description: 'BlueBubbles 服务器地址，例如 http://192.168.1.10:1234' },
-            password: { type: 'string', description: 'BlueBubbles 服务器设置中的 Server Password' },
-          },
-        },
-        execute: async (args) => {
-          const applied = applyConfig(args)
-          const check = await ping()
-          const webhook = check.ok ? await ensureWebhook() : null
-          return { ok: true, baseUrl: applied.baseUrl, hasPassword: applied.hasPassword, connection: check, webhook }
-        },
-      }),
-      define({
-        name: 'bluebubbles_ping',
-        description: '检查与已配置 BlueBubbles 服务器的连通性和鉴权。',
-        parameters: { type: 'object', properties: {} },
-        execute: async () => await ping(),
-      }),
-      define({
-        name: 'bluebubbles_list_chats',
-        description: '列出 BlueBubbles 上的 iMessage 会话（含显示名、参与者、最后一条消息），返回每个会话的 chatGuid。',
-        parameters: {
-          type: 'object',
-          properties: {
-            limit: { type: 'integer', description: '最多返回的会话数（默认 50，上限 100）' },
-          },
-        },
-        execute: async (args) => await listChats(args),
-      }),
-      define({
-        name: 'bluebubbles_get_messages',
-        description: '读取某个 iMessage 会话的最近消息（按时间倒序）。chatGuid 来自 bluebubbles_list_chats。',
-        parameters: {
-          type: 'object',
-          properties: {
-            chatGuid: { type: 'string', description: '会话 GUID（来自 bluebubbles_list_chats）' },
-            limit: { type: 'integer', description: '最多返回的消息数（默认 25，上限 100）' },
-          },
-          required: ['chatGuid'],
-        },
-        execute: async (args) => await getMessages(args),
-      }),
-      define({
         name: 'bluebubbles_send_text',
-        description: '通过 BlueBubbles 发送一条 iMessage 文本消息。chatGuid 来自 bluebubbles_list_chats。',
+        description: '通过 BlueBubbles 发送一条 iMessage 文本消息。chatGuid 可用 bash 里的 bb-channel chats 查询。',
         parameters: {
           type: 'object',
           properties: {
@@ -597,79 +587,6 @@ export default {
           required: ['chatGuid', 'filePath'],
         },
         execute: async (args) => await sendAttachment(args),
-      }),
-      define({
-        name: 'bluebubbles_get_attachment',
-        description: '按附件 GUID 下载 iMessage 附件（图片/文件）到指定目录（默认 $DSH_HOME/bluebubbles-media/）并返回本地路径。',
-        parameters: {
-          type: 'object',
-          properties: {
-            guid: { type: 'string', description: '附件 GUID（来自消息里的 attachments[].guid）' },
-            name: { type: 'string', description: '保存时使用的文件名（默认 attachment）' },
-            dir: { type: 'string', description: '目标目录（默认 $DSH_HOME/bluebubbles-media/）' },
-          },
-          required: ['guid'],
-        },
-        execute: async (args) => {
-          const guid = String(args.guid)
-          const name = typeof args.name === 'string' && args.name !== '' ? args.name : 'attachment'
-          const dir = typeof args.dir === 'string' && args.dir !== '' ? args.dir : undefined
-          const path = await downloadAttachment(guid, name, dir)
-          if (!path) return { ok: false, error: '下载失败（见日志）' }
-          return { ok: true, guid, path }
-        },
-      }),
-      define({
-        name: 'bluebubbles_bind',
-        description: '把 iMessage 会话绑定到 DSH 工作区或会话：新消息将通过 webhook 投递为目标会话的用户消息。workspacePath 与 sessionId 二选一（sessionId 更精确，workspacePath 解析到该工作区最新的会话）。',
-        parameters: {
-          type: 'object',
-          properties: {
-            chatGuid: { type: 'string', description: '会话 GUID（来自 bluebubbles_list_chats）' },
-            workspacePath: { type: 'string', description: '目标 DSH 工作区的目录路径（与 sessionId 二选一）' },
-            sessionId: { type: 'string', description: '目标 DSH 会话 ID（与 workspacePath 二选一，优先）' },
-          },
-          required: ['chatGuid'],
-        },
-        execute: async (args) => {
-          const workspacePath = typeof args.workspacePath === 'string' && args.workspacePath.trim() !== '' ? args.workspacePath.trim() : null
-          const sessionId = typeof args.sessionId === 'string' && args.sessionId.trim() !== '' ? args.sessionId.trim() : null
-          if (!workspacePath && !sessionId) return { ok: false, error: 'workspacePath 与 sessionId 至少提供一个' }
-          const key = 'chat:' + String(args.chatGuid)
-          state.bindings[key] = sessionId ? { sessionId } : { workspacePath: workspacePath as string }
-          await saveBindings()
-          return { ok: true, key, binding: state.bindings[key], total: Object.keys(state.bindings).length }
-        },
-      }),
-      define({
-        name: 'bluebubbles_unbind',
-        description: '解除 iMessage 会话与工作区的绑定。',
-        parameters: {
-          type: 'object',
-          properties: {
-            chatGuid: { type: 'string', description: '会话 GUID' },
-          },
-          required: ['chatGuid'],
-        },
-        execute: async (args) => {
-          const key = 'chat:' + String(args.chatGuid)
-          const existed = Object.prototype.hasOwnProperty.call(state.bindings, key)
-          delete state.bindings[key]
-          await saveBindings()
-          return { ok: true, removed: existed, total: Object.keys(state.bindings).length }
-        },
-      }),
-      define({
-        name: 'bluebubbles_list_bindings',
-        description: '查看当前 iMessage 会话到 DSH 工作区的绑定表。',
-        parameters: { type: 'object', properties: {} },
-        execute: async () => ({ ok: true, bindings: state.bindings, bindingsPath: state.bindingsPath }),
-      }),
-      define({
-        name: 'bluebubbles_webhook_status',
-        description: '查看并（如缺失）自动注册 BlueBubbles → DSH 的新消息 webhook。',
-        parameters: { type: 'object', properties: {} },
-        execute: async () => await ensureWebhook(),
       }),
     ]
 

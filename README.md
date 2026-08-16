@@ -1,167 +1,110 @@
 # dsh-bluebubbles
 
-把本地 [BlueBubbles](https://bluebubbles.app) 服务器（macOS 上的 iMessage 桥）接入 DeepSeek Harness 的插件。
+把本地 [BlueBubbles](https://bluebubbles.app) 服务器（macOS 上的 iMessage 桥）接入 DeepSeek Harness。
 
-## 能力
+架构原则（Unix 哲学）：**host 插件只保留被动能力**（webhook 接收 + 绑定解析 + 消息注入）和**两个高频模型工具**（发文本/发附件）；其余一切操作收敛到 `bb-channel` CLI——agent 经 bash 调用，人和自动化脚本也能直接用。
 
-**REST 工具（模型按需调用）**
+## 组件
+
+| 组件 | 位置 | 作用 |
+| --- | --- | --- |
+| `bluebubbles-bridge` | `src/index.ts` | webhook 路由 + 消息注入 + 2 个发送工具 + `bluebubbles` 服务 |
+| `dsh-heartbeat` | `src/heartbeat.ts` | 通用定时唤醒（读 `heartbeat-targets.json`） |
+| `dsh-cron` | `src/cron.ts` | cron 时刻任务（读 `cron-jobs.json`） |
+| `bb-channel` | `bin/bb-channel.mjs` | CLI：chats/messages/send/bind/contacts/webhook/configure… |
+
+## 模型工具（刻意只留两个）
 
 | 工具 | 作用 |
 | --- | --- |
-| `bluebubbles_configure` | 设置 baseUrl / 密码（自动 ping 验证） |
-| `bluebubbles_ping` | 连通性与鉴权检查 |
-| `bluebubbles_list_chats` | 列出 iMessage 会话 |
-| `bluebubbles_get_messages` | 读取会话最近消息 |
 | `bluebubbles_send_text` | 发送文本消息 |
-| `bluebubbles_bind` | 绑定 chatGuid → DSH 工作区路径 |
-| `bluebubbles_unbind` | 解除绑定 |
-| `bluebubbles_list_bindings` | 查看绑定表 |
-| `bluebubbles_webhook_status` | 查看/自注册 BlueBubbles webhook |
+| `bluebubbles_send_attachment` | 发送附件（图片/文件） |
 
-**推送（webhook）**
+其余操作全部走 CLI（agent 用 bash 调，等价能力）：
+
+```bash
+~/.local/bin/bb-channel chats [--limit N] [--all]      # 列会话（默认过滤占位/配对码噪音）
+~/.local/bin/bb-channel messages <chatGuid> [--limit N] # 读历史（带发送者显示名）
+~/.local/bin/bb-channel send <chatGuid> <文本...>       # 发文本
+~/.local/bin/bb-channel send-attachment <chatGuid> <文件>
+~/.local/bin/bb-channel attachment <guid> [--dir D]     # 下载附件
+~/.local/bin/bb-channel bind <chatGuid> (--workspace PATH | --session ID)
+~/.local/bin/bb-channel unbind <chatGuid>
+~/.local/bin/bb-channel bindings                        # 查看绑定表
+~/.local/bin/bb-channel contacts / set-contact <地址> <名字>
+~/.local/bin/bb-channel webhook [--url URL]             # 查看/自注册 webhook
+~/.local/bin/bb-channel ping / configure                # 连通性 / 写 ~/.dsh/.env
+```
+
+- 输出一律 pretty JSON（可 jq）；错误写 stderr 且 exit 1。
+- 凭据链与插件相同：`process.env` → `~/.dsh/.env` → `~/.zshenv`，无需手填。
+- CLI 直接编辑 `~/.dsh/bluebubbles-bindings.json` / `bluebubbles-contacts.json`；插件在每条入站消息前热重读这两个文件，**改完即生效，无需重载**。
+
+## 推送链路（webhook）
 
 ```
 BlueBubbles 服务器（新消息）
    │  POST {type:"new-message", data:{...}}
    ▼
 DSH webServer 路由  /bluebubbles/webhook  (loopback-only)
-   │  查绑定表 chatGuid → workspacePath
+   │  热重读绑定表/通讯录 → 查 chatGuid → workspacePath/sessionId
    ▼
 workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step', true)
    ▼
-该工作区的模型被唤醒，收到一条标注来源的用户消息
+该工作区的模型被唤醒，收到「📱 iMessage · 群名 · 来自 名字（号码）」标注的消息
 ```
 
-- 防回环：`isFromMe` 或 `tempGuid` 以 `dsh-` 开头的消息不回灌。
-- 未绑定的会话：忽略并记日志。
-- 绑定表持久化：`$DSH_HOME/bluebubbles-bindings.json`（默认 `~/.dsh`；写失败时降级为内存态）。
+**防回环（双层，v22+）**：
+
+1. `pendingSent` 待发队列：插件每次发送前登记 `(chatGuid, 归一化文本)`，webhook 回显 `isFromMe=true` 的消息按此匹配丢弃（60s TTL，unicode NFC 归一比较）；
+2. `seenGuids`：发送成功后把 API 返回的真实 guid 记入去重集（BlueBubbles 偶发重复推送同一事件，第二层兜底）。
+
+不能再用 `isFromMe` 一刀切：同 Apple ID 的手机在**自聊 DM** 里发的消息也是 `isFromMe=true`，一刀切会误杀真实用户消息。
+
+**发送者显示名**：`payload.handle.displayName` → `~/.dsh/bluebubbles-contacts.json`（地址→名字，`bb-channel set-contact` 维护）→ 裸号码。
 
 ## 配置
 
-### 1. 服务器地址与密码（三选一，按优先级）
+### 凭据
 
-| 方式 | 设置方法 | 生效时机 |
-| --- | --- | --- |
-| `bluebubbles_configure` 工具 | 让模型调用：`{"baseUrl": "…", "password": "…"}` | 立即生效，仅存内存；插件重载/DSH 重启后回落到下面两种 |
-| 环境变量 | 启动 DSH 前 `export BLUEBUBBLES_PASSWORD=…`（可加 `BLUEBUBBLES_BASE_URL`） | DSH 重启后生效（进程 env 在启动时固化） |
-| `~/.zshenv` | 写一行 `export BLUEBUBBLES_PASSWORD=…` | 插件挂载/热重载时读取：改完保存 patch 文件（或重启 DSH）即生效 |
-
-- 默认地址 `http://localhost:1234`（BlueBubbles 服务器默认端口）。
-- 仓库与 patch 文件不含密钥。
-- 验证：`bluebubbles_ping` 返回 `ok:true` + 延迟。
-
-### 2. Webhook 推送（自动，无需手配）
-
-- 插件启动（或 `configure` 成功）后自动向 BlueBubbles 注册 `POST http://127.0.0.1:3080/bluebubbles/webhook`（事件 `new-message`），幂等。
-- 检查：`bluebubbles_webhook_status`；或在 BlueBubbles 服务器设置 → Webhooks 里应看到该 URL 一行。
-- 端口：DSH 的 web 端口改变时，需同步修改 `src/index.ts` 里的 `WEBHOOK_URL`。
-
-### 3. 会话绑定（决定消息投递到哪）
-
-| 工具 | 示例参数 |
+| 方式 | 生效时机 |
 | --- | --- |
-| `bluebubbles_list_chats` | `{}` 或 `{"limit": 50}` —— 拿到每个会话的 `chatGuid` |
-| `bluebubbles_bind` | `{"chatGuid": "any;-;+<phone>", "sessionId": "session-…"}` 或 `{"chatGuid": "…", "workspacePath": "/Users/you/ds-channel"}` |
-| `bluebubbles_unbind` | `{"chatGuid": "…"}` |
-| `bluebubbles_list_bindings` | `{}` |
+| `bb-channel configure --password <pw>`（写 `~/.dsh/.env`） | DSH 重启或桥重载后 |
+| 环境变量 `BLUEBUBBLES_PASSWORD`（可加 `BLUEBUBBLES_BASE_URL`） | DSH 重启后 |
 
-- `sessionId`（精确）与 `workspacePath`（解析到该工作区最新会话）二选一；会话 ID 在 DSH 会话内可用 `echo $DSH_SESSION_ID` 查看。
-- 绑定表持久化于 `$DSH_HOME/bluebubbles-bindings.json`（默认 `~/.dsh`；可用 `BLUEBUBBLES_BINDINGS` 覆盖路径），插件重载/重启后自动恢复。
-- 未绑定的会话消息只会记日志，不会打扰任何工作区。
+**`.env` 里严禁 `DSH_` 前缀变量**——DSH bootstrap 会拒绝启动。因此心跳/cron 的配置键是 `HEARTBEAT_INTERVAL` / `HEARTBEAT_TARGETS` / `CRON_JOBS`。
 
-### 心跳（独立组件 dsh-heartbeat）
+### 状态文件（`$DSH_HOME`，默认 `~/.dsh`）
 
-- 与频道无关的通用定时唤醒；目标自持配置于 `$DSH_HOME/heartbeat-targets.json`：
-  `{ "标签": { "workspacePath": "…" } 或 { "sessionId": "…" }, "heartbeatMd": "可选自定义提示文件路径" }`
-- 提示语默认读工作区根的 `HEARTBEAT.md`（OpenClaw 同款语义，无事回 HEARTBEAT_OK）；目标会话无活跃 agent 时静默跳过。
-- 间隔：`DSH_HEARTBEAT_INTERVAL`，支持 `30m` / `2h` / `12h`（裸数字按小时，`s`/`ms` 也可），默认 `12h`，下限 1 分钟；首触发锚定墙钟边界。
-- 修改 targets 后热重载心跳行（patch 里 `?v=N` +1）即重读。
-
-### cron（独立组件 dsh-cron）
-
-- 精确时刻任务，配置于 `$DSH_HOME/cron-jobs.json`：
-  `{ "jobs": { "标签": { "schedule": "5 9 * * *", "target": { workspacePath|sessionId }, "prompt": "…" 或 "promptFile": "绝对路径" } } }`
-- schedule 为 5 字段 cron（分 时 日 月 周，支持 `*` `,` `-` `/`；周 0=周日）。
-- 到点把 prompt（或 promptFile 内容）以用户消息注入目标会话；目标无活跃 agent 时静默跳过；热重载不会在同一分钟重复触发。
-- 修改配置后热重载 cron 行即重读。
-
-### 4. 更新代码
-
-1. 修改 `src/*.ts` → `npm run typecheck` → `git commit`
-2. 编辑 `~/.dsh/profiles/web/cordis.patch.yml`，把对应行的 `?v=N` 递增一位并保存
-3. 文件监视器热重载，无需重启 DSH；用 `bluebubbles_ping` 确认。
-
-### 5. 端到端测试
-
-绑定一个会话 → 从手机给 Mac 的 iMessage 账号发消息 → 几秒内消息以用户回合出现在目标会话。注意：其它 BlueBubbles 消费者（如 OpenClaw）会同时响应，属正常现象；本插件只处理已绑定会话的入站消息。
-
-## 路径总览
-
-### 环境与凭据（读取链：`process.env` → `$DSH_HOME/.env` → `~/.zshenv`）
-
-| 键 | 含义 | 默认 |
+| 路径 | 内容 | 写者 |
 | --- | --- | --- |
-| `DSH_HOME` | 所有 DSH 路径的根 | `~/.dsh` |
-| `BLUEBUBBLES_PASSWORD` | BlueBubbles 服务器密码 | 无（必需） |
-| `BLUEBUBBLES_BASE_URL` | 服务器地址 | `http://localhost:1234` |
-| `BLUEBUBBLES_HEARTBEAT_INTERVAL` | 已更名：见 `DSH_HEARTBEAT_INTERVAL` | — |
-| `DSH_HEARTBEAT_INTERVAL` | 心跳间隔（`30m`/`2h`/`12h`，裸数字=小时，下限 1 分钟） | `12h` |
-| `BLUEBUBBLES_BINDINGS` | 绑定表路径覆盖 | `$DSH_HOME/bluebubbles-bindings.json` |
-| `DSH_HEARTBEAT_TARGETS` | 心跳目标路径覆盖 | `$DSH_HOME/heartbeat-targets.json` |
-| `DSH_CRON_JOBS` | cron 任务配置路径覆盖 | `$DSH_HOME/cron-jobs.json` |
+| `bluebubbles-bindings.json` | `{ "chat:<guid>": { workspacePath \| sessionId } }` | `bb-channel bind/unbind` |
+| `bluebubbles-contacts.json` | `{ "地址": "显示名" }` | `bb-channel set-contact` |
+| `bluebubbles-media/` | 收到的附件统一存放处（`<guid>-<文件名>`） | bridge 自动下载 |
+| `heartbeat-targets.json` | 心跳目标 | 手编 |
+| `cron-jobs.json` | cron 任务 | 手编 |
 
-### 绑定相关（重点）
+**会话解析链**：`sessionId` 直连 → 否则 `workspacePath` → 该工作区 `sessionIds[0]`（最新会话）→ 校验活跃 agent。无活跃 agent 则丢弃并记日志（不回退、不排队）。
 
-| 路径 | 内容 | 所有者 | 读写时机 | 写失败 |
-| --- | --- | --- | --- | --- |
-| `$DSH_HOME/bluebubbles-bindings.json` | `{ "chat:<guid>": { workspacePath \| sessionId } }` | bridge | 启动载入；bind/unbind 每次变更写盘 | 降级内存态（日志提示） |
-| `$DSH_HOME/heartbeat-targets.json` | `{ "标签": { workspacePath \| sessionId, heartbeatMd? } }` | dsh-heartbeat | 启动只读；改文件后热重载生效 | 读不到 = 心跳未启用 |
-| `$DSH_HOME/cron-jobs.json` | `{ "jobs": { "标签": { schedule, target, prompt \| promptFile } } }` | dsh-cron | 启动只读；改文件后热重载生效 | 读不到 = cron 未启用 |
-| `$DSH_HOME/bluebubbles-media/` | 所有收到的附件（含工作区绑定）+ 手动下载 | bridge | 收附件时 `mkdir -p` + 下载 | 下载失败记日志，消息仍投递 |
-| `<目标工作区>/HEARTBEAT.md` | 心跳提示引用的自查清单（agent 自读，插件不读） | 用户/agent | — | — |
+### 更新代码
 
-**媒体统一存 `$DSH_HOME/bluebubbles-media/`**；agent 需要把媒体放进工作区时自行 `cp`——`workspace-write` 沙箱下"读外部 + 写工作区"无需提权。
+1. 改 `src/*.ts` → `npm run typecheck` → `git commit`
+2. 编辑 `~/.dsh/profiles/web/cordis.patch.yml` 对应行 `?v=N` +1 保存
+3. 本进程 HMR 对桥模块的热替换不可靠（旧 fiber 路由残留），**重启 DSH 是可靠加载方式**；用 `curl -X POST -d '{}' http://127.0.0.1:3080/bluebubbles/webhook` 看版本标记（`ok-vN`）确认。
 
-**会话解析链**（`lib.resolveSession`）：`sessionId` 直连（精确，无 fallback）→ 否则 `workspacePath` → 该工作区 `sessionIds[0]`（最新会话）→ `agents.get` 校验活跃 → 无活跃 agent 则丢弃并记日志（不回退到次新会话、不排队补投）。
+### 诊断
 
-**媒体文件名**：`<附件guid>-<清洗后的transferName>`（非法字符替换为 `_`，最长 80 字符）。
-
-### 部署与远端
-
-| 路径 | 说明 |
-| --- | --- |
-| `$DSH_HOME/profiles/web/cordis.patch.yml` | host 合成 patch 层：`bluebubbles-bridge`（`src/index.ts?v=N`）+ `dsh-heartbeat`（`src/heartbeat.ts?v=N`）+ `dsh-cron`（`src/cron.ts?v=N`），保存即热重载 |
-| `/Users/you/ds-channel/bluebubbles-dsh/` | 插件源码仓库（`src/index.ts`、`src/heartbeat.ts`、`src/cron.ts`、`src/lib.ts`） |
-| `http://127.0.0.1:3080/bluebubbles/webhook` | 本机回环 webhook 入口（BlueBubbles 服务器上注册为 id 10，事件 `new-message`） |
-| `http://localhost:1234/api/v1/*?password=…` | BlueBubbles REST（插件经 shell+curl 调用） |
-| `$DSH_HOME/storages/workspace.json` | 工作区注册表（`sessionIds` 顺序 = 会话解析依据；由 GUI 维护） |
+`BLUEBUBBLES_DEBUG=1`（env 或 `.env`）时，入站事件与丢弃原因写入 `~/.dsh/bluebubbles-debug.log`（串行化追加，不丢行）。
 
 ## 安全
 
-- webhook 路由只接受 loopback 来源（`127.0.0.1` / `::1`）；BlueBubbles webhook 无签名机制。
-- 注入内容只是文本消息，不会触发工具；发消息仍由模型显式调用 `bluebubbles_send_text`。
-- 与 OpenClaw 等其它 BlueBubbles 消费者互不干扰（webhook 是服务端广播）。
+- webhook 路由只接受 loopback 来源；BlueBubbles webhook 无签名机制。
+- 注入内容只是文本消息，不触发工具；外发始终由模型显式调用发送工具。
+- 仓库与 patch 文件不含密钥。
 
 ## 技术栈
 
-- **TypeScript**（仅可擦除语法：无 enum/namespace/参数属性），类型来自真实的 `@deepseek-ai/dsh-*` devDependencies（与部署版本 0.1.0-rc.6 / cordis 4.0.1 对齐）。
-- **零构建**：Node ≥ 23.6 原生类型剥离，composition 行直接指向 `src/index.ts`；`npm run typecheck`（`tsc --noEmit`）做类型检查。
+- **TypeScript**（仅可擦除语法），类型来自 `@deepseek-ai/dsh-*` devDeps（0.1.0-rc.6 / cordis 4.0.1）。
+- **零构建**：Node ≥ 23.6 原生类型剥离，composition 行直接指向 `src/index.ts`。
+- CLI 为纯 Node ESM（`bin/bb-channel.mjs`），零依赖，全局 `fetch`/`FormData`。
 - 初始化：`npm install --cache ./.npm-cache && npm run typecheck`。
-
-## 平面归属与部署
-
-- 目标平面：**host composition**。本插件发布 `bluebubbles` 服务、注册 HTTP 路由、跨会话注入 agent，是进程级共享能力；若放入 agent preset，`ctx.provide('bluebubbles')` 会触发 "published process-global service" mount 审计拒绝（第二会话挂载即撞名）。
-- 加载方式：composition 行 `name: /Users/you/ds-channel/bluebubbles-dsh/src/index.ts`（相对路径由 cordis-plugin-loader 直接解析，无需 npm 发布；Node 26 原生剥离 TS）。
-- 本包为 **Host-only**；Client（设置页）留待后续以 `dsh.client` 双面包形式接入（需要 checkout 的 web 构建管线）。
-
-## 与动态插件的关系
-
-动态插件 `bubbl-1`（pkg-1/pkg-2，sandbox + harness API，纯 JS）是快速迭代载体；本仓库是持久化的**真实插件 TS 移植版**（真实 Cordis API：`ctx.tools.register`、`webServer.register`、`agent.send`、`process.env`），稳定后作为 host composition 行挂载，重启不丢。两者 API 面不同，逻辑一一对应。
-
-## 路线图
-
-- [x] REST 工具 + 凭据引导（等价动态 pkg-2）
-- [x] webhook 接收路由 + 绑定路由到工作区（初稿）
-- [ ] host composition 行挂载 + mount 验证
-- [ ] Client `dsh.client` 设置页（可选）
-- [ ] 回环测试：真实 iMessage 消息进指定工作区
