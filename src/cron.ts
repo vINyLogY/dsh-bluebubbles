@@ -80,7 +80,7 @@ export default {
     const agents = getService<AgentsService>(ctx, 'agents')
     const workspaces = getService<WorkspaceRegistryService>(ctx, 'workspaceRegistry')
     const dshHome = (process.env.DSH_HOME || process.env.HOME + '/.dsh') as string
-    const jobsPath = (process.env.DSH_CRON_JOBS || dshHome + '/cron-jobs.json') as string
+    const jobsPath = (process.env.CRON_JOBS || dshHome + '/cron-jobs.json') as string
 
     let jobs: Record<string, CronJob> = {}
     const matches: Record<string, ScheduleMatch> = {}

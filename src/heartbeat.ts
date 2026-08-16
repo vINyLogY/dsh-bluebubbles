@@ -27,7 +27,7 @@ export default {
     const agents = getService<AgentsService>(ctx, 'agents')
     const workspaces = getService<WorkspaceRegistryService>(ctx, 'workspaceRegistry')
     const dshHome = (process.env.DSH_HOME || process.env.HOME + '/.dsh') as string
-    const targetsPath = (process.env.DSH_HEARTBEAT_TARGETS || dshHome + '/heartbeat-targets.json') as string
+    const targetsPath = (process.env.HEARTBEAT_TARGETS || dshHome + '/heartbeat-targets.json') as string
 
     let targets: Record<string, HeartbeatTarget> = {}
 
@@ -72,10 +72,10 @@ export default {
         console.log('hb: 未启用（' + targetsPath + ' 为空或不存在）')
         return
       }
-      let raw = process.env.DSH_HEARTBEAT_INTERVAL
+      let raw = process.env.HEARTBEAT_INTERVAL
       if (raw === undefined) {
         const fileText = await readEnvFiles(ctx.shell, ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"'])
-        if (fileText) raw = pickEnvValue(fileText, 'DSH_HEARTBEAT_INTERVAL') ?? undefined
+        if (fileText) raw = pickEnvValue(fileText, 'HEARTBEAT_INTERVAL') ?? undefined
       }
       const parsed = parseInterval(raw)
       const heartbeatMs = parsed !== null && parsed >= 60000 ? parsed : 12 * 60 * 60 * 1000
