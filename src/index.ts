@@ -326,7 +326,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v25')
+      res.end('ok-v26')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -536,6 +536,11 @@ export default {
           const reply = assistantTextOf(event)
           if (reply === '') return // 纯工具调用步，等后续文本
           inboundTriggers.delete(sessionId)
+          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮不向 iMessage 投递任何内容
+          if (reply === 'NO_REPLY') {
+            void dbg('relay suppressed NO_REPLY session=' + sessionId)
+            return
+          }
           void sendText({ chatGuid: trigger.chatGuid, text: reply }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
