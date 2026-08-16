@@ -255,17 +255,20 @@ export default {
     // BlueBubbles webhook 不回显 tempGuid，故 tempGuid 过滤不足以防环；此处为主防线。
     const pendingSent: Array<{ chat: string; text: string; at: number }> = []
     const PENDING_TTL = 60000
+    // webhook 与 REST 的文本可能 unicode 归一化不同（NFC/NFD），比较前统一归一
+    function normText(t: string): string { return t.normalize('NFC').trim() }
     function noteSent(chat: string, text: string): void {
-      pendingSent.push({ chat, text, at: Date.now() })
+      pendingSent.push({ chat, text: normText(text), at: Date.now() })
       if (pendingSent.length > 100) pendingSent.splice(0, pendingSent.length - 100)
     }
     function matchPending(chat: string | null, text: string): boolean {
       const now = Date.now()
       while (pendingSent.length > 0 && now - pendingSent[0].at > PENDING_TTL) pendingSent.shift()
       if (!chat) return false
+      const needle = normText(text)
       for (let i = pendingSent.length - 1; i >= 0; i--) {
         const p = pendingSent[i]
-        if (p.chat === chat && p.text === text) {
+        if (p.chat === chat && p.text === needle) {
           pendingSent.splice(i, 1)
           return true
         }
@@ -309,7 +312,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v22')
+      res.end('ok-v23')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -328,20 +331,26 @@ export default {
 
     // ---- 诊断面包屑（BLUEBUBBLES_DEBUG=1 时写入 $DSH_HOME/bluebubbles-debug.log）----
     let debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
+    // 串行化写队列：read-modify-write 并发会丢行，链式追加保证面包屑完整
+    let dbgQueue: Promise<void> = Promise.resolve()
     async function dbg(line: string): Promise<void> {
       if (!debugEnabled || !fs) return
-      try {
-        const path = dshHome + '/bluebubbles-debug.log'
-        let prev = ''
+      const write = async (): Promise<void> => {
         try {
-          prev = await fs.readText(await fs.resolve(path))
+          const path = dshHome + '/bluebubbles-debug.log'
+          let prev = ''
+          try {
+            prev = await fs.readText(await fs.resolve(path))
+          } catch {
+            // 文件不存在 = 从空开始
+          }
+          await fs.writeText(await fs.resolve(path), prev + new Date().toISOString() + ' ' + line + '\n')
         } catch {
-          // 文件不存在 = 从空开始
+          // 诊断失败不影响主流程
         }
-        await fs.writeText(await fs.resolve(path), prev + new Date().toISOString() + ' ' + line + '\n')
-      } catch {
-        // 诊断失败不影响主流程
       }
+      dbgQueue = dbgQueue.then(write)
+      await dbgQueue
     }
 
     async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
