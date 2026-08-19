@@ -496,8 +496,9 @@ export default {
 
     // ================= iMessage 触发回合的人体工学（typing 指示 + 回复自动投递） =================
     // 语义：注入 iMessage 时登记触发；该会话随后的回合视为"在回复这条 iMessage"——
-    // typing 让对方看到「正在输入」；relay 开启时第一个含文本的 assistant 消息自动发回
-    // （经 sendText，自带 noteSent 防环），随后触发清除；回合结束未产出文本也清除，防串台。
+    // typing 让对方看到「正在输入」；relay 开启时回合内每条含文本的 assistant 消息都自动发回
+    // （经 sendText，自带 noteSent 防环；只取 text 部件，thinking/工具结果不投递）；
+    // 回合结束（turn/end）清除触发，防串台。
     const inboundTriggers = new Map<string, { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number }>()
 
     async function sendTyping(chatGuid: string): Promise<void> {
@@ -535,12 +536,13 @@ export default {
         if (event.type === 'assistant/message' && trigger.relay) {
           const reply = assistantTextOf(event)
           if (reply === '') return // 纯工具调用步，等后续文本
-          inboundTriggers.delete(sessionId)
-          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮不向 iMessage 投递任何内容
+          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮剩余内容也不再投递，触发立即清除
           if (reply === 'NO_REPLY') {
+            inboundTriggers.delete(sessionId)
             void dbg('relay suppressed NO_REPLY session=' + sessionId)
             return
           }
+          // 投递本回合每一条文本；触发保留到 turn/end，后续文本继续转发
           void sendText({ chatGuid: trigger.chatGuid, text: reply }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
