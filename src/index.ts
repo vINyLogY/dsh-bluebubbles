@@ -326,7 +326,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v28')
+      res.end('ok-v29')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -486,6 +486,7 @@ export default {
             relay: binding.relay === true,
             typing: binding.typing !== false,
             lastTypingAt: 0,
+            lastText: '',
           })
           if (binding.typing !== false) void sendTyping(chatGuid)
         }
@@ -496,10 +497,10 @@ export default {
 
     // ================= iMessage 触发回合的人体工学（typing 指示 + 回复自动投递） =================
     // 语义：注入 iMessage 时登记触发；该会话随后的回合视为"在回复这条 iMessage"——
-    // typing 让对方看到「正在输入」；relay 开启时回合内每条含文本的 assistant 消息都自动发回
-    // （经 sendText，自带 noteSent 防环；只取 text 部件，thinking/工具结果不投递）；
-    // 回合结束（turn/end）清除触发，防串台。
-    const inboundTriggers = new Map<string, { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number }>()
+    // typing 让对方看到「正在输入」；relay 开启时回合内只把【最后一条】含文本的 assistant 消息
+    // 在 turn/end 统一发回（经 sendText，自带 noteSent 防环；只取 text 部件，thinking/工具结果
+    // 以及中间的播报/思考文本都不投递），一个入站消息只产生一条回复，防串台也防刷屏。
+    const inboundTriggers = new Map<string, { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number; lastText: string }>()
 
     async function sendTyping(chatGuid: string): Promise<void> {
       try {
@@ -536,20 +537,25 @@ export default {
           return
         }
         if (event.type === 'assistant/message' && trigger.relay) {
-          const { text, hasToolCall } = assistantTextOf(event)
+          const { text } = assistantTextOf(event)
           if (text === '') return // 纯工具调用步，等后续文本
-          if (hasToolCall) { void dbg('relay skip narration step session=' + sessionId); return } // 带工具调用的步=工作播报，不投递
-          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮剩余内容也不再投递，触发立即清除
+          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮不向 iMessage 投递任何内容
           if (text === 'NO_REPLY') {
             inboundTriggers.delete(sessionId)
             void dbg('relay suppressed NO_REPLY session=' + sessionId)
             return
           }
-          // 投递本回合每一条纯文本回复；触发保留到 turn/end，后续文本继续转发
-          void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
+          // 只缓存不投递：回合内多次文本（含播报/思考）只留最后一条，turn/end 统一发一次
+          trigger.lastText = text
           return
         }
-        if (event.type === 'turn/end') inboundTriggers.delete(sessionId)
+        if (event.type === 'turn/end') {
+          const finalText = trigger.lastText
+          inboundTriggers.delete(sessionId)
+          if (trigger.relay && finalText !== '') {
+            void sendText({ chatGuid: trigger.chatGuid, text: finalText }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
+          }
+        }
       } catch {
         // 事件监听器绝不许影响会话事件流
       }
