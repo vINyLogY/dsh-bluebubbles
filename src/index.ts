@@ -44,6 +44,7 @@ export default {
       bindingsPath: (process.env.BLUEBUBBLES_BINDINGS || dshHome + '/bluebubbles-bindings.json') as string,
       contacts: {} as Record<string, string>,
       contactsPath: (process.env.BLUEBUBBLES_CONTACTS || dshHome + '/bluebubbles-contacts.json') as string,
+      relayStatePath: (process.env.BLUEBUBBLES_RELAY_STATE || dshHome + '/bluebubbles-relay-state.json') as string,
     }
 
     // ================= HTTP 辅助（经 shell 跑 curl：web 服务只支持 GET） =================
@@ -481,12 +482,7 @@ export default {
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
         // 登记 iMessage 触发的回合：typing 指示（缺省开）与回复自动投递（relay: true 时）
         if (chatGuid) {
-          inboundTriggers.set(sessionId, {
-            chatGuid,
-            relay: binding.relay === true,
-            typing: binding.typing !== false,
-            lastTypingAt: 0,
-          })
+          await setTrigger(sessionId, chatGuid, binding.relay === true, binding.typing !== false)
           if (binding.typing !== false) void sendTyping(chatGuid)
         }
         await dbg('delivered session=' + sessionId)
@@ -499,7 +495,63 @@ export default {
     // typing 让对方看到「正在输入」；relay 开启时回合内每条含 text 部件的 assistant 消息都
     // 即时发回（经 sendText，自带 noteSent 防环；只取 type==='text' 部件，thinking/reasoning
     // 与工具结果一律不投递）；turn/end 清除触发，防串台。
-    const inboundTriggers = new Map<string, { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number }>()
+    // 触发表持久化到 relay-state 文件：热重载会在回合中途重建插件实例，纯内存表会丢触发，
+    // 导致「入站消息收到了、回复却没 relay」的静默失败。setAt + TTL 防止陈年触发复活串台。
+    type RelayTrigger = { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number; setAt: number }
+    const RELAY_TRIGGER_TTL_MS = 10 * 60 * 1000
+    const inboundTriggers = new Map<string, RelayTrigger>()
+
+    async function persistTriggers(): Promise<void> {
+      if (!fs) return
+      try {
+        const obj: Record<string, RelayTrigger> = {}
+        for (const [sessionId, t] of inboundTriggers) obj[sessionId] = { ...t }
+        const dir = state.relayStatePath.replace(/\/[^/]*$/, '')
+        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
+        const target = await fs.resolve(state.relayStatePath)
+        await fs.writeText(target, JSON.stringify(obj, null, 2))
+      } catch (err) {
+        console.log('bb: relay 状态写盘失败（降级为内存态）：' + (err instanceof Error ? err.message : err))
+      }
+    }
+
+    async function loadTriggers(): Promise<void> {
+      const raw = await readJsonFile(state.relayStatePath)
+      if (!raw) return
+      const now = Date.now()
+      let loaded = 0
+      for (const [sessionId, value] of Object.entries(raw)) {
+        if (!value || typeof value !== 'object') continue
+        const t = value as Partial<RelayTrigger>
+        if (typeof t.chatGuid !== 'string') continue
+        if (typeof t.setAt !== 'number' || now - t.setAt > RELAY_TRIGGER_TTL_MS) continue // 过期触发直接丢弃
+        inboundTriggers.set(sessionId, {
+          chatGuid: t.chatGuid,
+          relay: t.relay !== false,
+          typing: t.typing !== false,
+          lastTypingAt: 0,
+          setAt: t.setAt,
+        })
+        loaded += 1
+      }
+      if (loaded > 0) void dbg('relay triggers loaded=' + loaded)
+    }
+
+    async function setTrigger(sessionId: string, chatGuid: string, relay: boolean, typing: boolean): Promise<void> {
+      inboundTriggers.set(sessionId, {
+        chatGuid,
+        relay,
+        typing,
+        lastTypingAt: 0,
+        setAt: Date.now(),
+      })
+      await persistTriggers()
+    }
+
+    async function clearTrigger(sessionId: string): Promise<void> {
+      if (!inboundTriggers.delete(sessionId)) return
+      await persistTriggers()
+    }
 
     async function sendTyping(chatGuid: string): Promise<void> {
       try {
@@ -538,7 +590,7 @@ export default {
           if (text === '') return // 纯工具调用步，等后续文本
           // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮剩余内容也不再投递，触发立即清除
           if (text === 'NO_REPLY') {
-            inboundTriggers.delete(sessionId)
+            void clearTrigger(sessionId)
             void dbg('relay suppressed NO_REPLY session=' + sessionId)
             return
           }
@@ -546,7 +598,7 @@ export default {
           void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
-        if (event.type === 'turn/end') inboundTriggers.delete(sessionId)
+        if (event.type === 'turn/end') void clearTrigger(sessionId)
       } catch {
         // 事件监听器绝不许影响会话事件流
       }
@@ -574,6 +626,7 @@ export default {
         if (!debugEnabled && fileText) debugEnabled = pickEnvValue(fileText, 'BLUEBUBBLES_DEBUG') === '1'
       }
       await reloadStateFiles(true)
+      await loadTriggers()
       if (state.password !== '') {
         const wh = await ensureWebhook()
         console.log('bb: 凭据就绪（' + state.baseUrl + '），webhook 注册：' + JSON.stringify(wh))
