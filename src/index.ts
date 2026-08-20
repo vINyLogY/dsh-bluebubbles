@@ -326,7 +326,7 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v27')
+      res.end('ok-v28')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -509,14 +509,16 @@ export default {
       }
     }
 
-    function assistantTextOf(event: { data?: any }): string {
+    function assistantTextOf(event: { data?: any }): { text: string; hasToolCall: boolean } {
       const message = event.data && event.data.message
       const content = message && Array.isArray(message.content) ? message.content : []
       const texts: string[] = []
+      let hasToolCall = false
       for (const part of content) {
         if (part && part.type === 'text' && typeof part.text === 'string') texts.push(part.text)
+        if (part && part.type === 'tool-call') hasToolCall = true
       }
-      return texts.join('\n').trim()
+      return { text: texts.join('\n').trim(), hasToolCall }
     }
 
     ctx.on('session/event', (session: { id?: string }, event: { type?: string; data?: any }) => {
@@ -534,16 +536,17 @@ export default {
           return
         }
         if (event.type === 'assistant/message' && trigger.relay) {
-          const reply = assistantTextOf(event)
-          if (reply === '') return // 纯工具调用步，等后续文本
+          const { text, hasToolCall } = assistantTextOf(event)
+          if (text === '') return // 纯工具调用步，等后续文本
+          if (hasToolCall) { void dbg('relay skip narration step session=' + sessionId); return } // 带工具调用的步=工作播报，不投递
           // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮剩余内容也不再投递，触发立即清除
-          if (reply === 'NO_REPLY') {
+          if (text === 'NO_REPLY') {
             inboundTriggers.delete(sessionId)
             void dbg('relay suppressed NO_REPLY session=' + sessionId)
             return
           }
-          // 投递本回合每一条文本；触发保留到 turn/end，后续文本继续转发
-          void sendText({ chatGuid: trigger.chatGuid, text: reply }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
+          // 投递本回合每一条纯文本回复；触发保留到 turn/end，后续文本继续转发
+          void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
         if (event.type === 'turn/end') inboundTriggers.delete(sessionId)
