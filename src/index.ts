@@ -744,6 +744,11 @@ export default {
         return saveBindings()
       },
       listBindings: () => state.bindings,
+      // 供 dsh-cron 等插件复用入站 relay 机制：给指定会话登记「回复自动投递到 chatGuid」触发。
+      // 语义与 iMessage 入站触发的回合完全一致（assistant 文本逐条即时投递、NO_REPLY 抑制、
+      // turn/end 清除、触发表持久化 + TTL）。
+      armRelay: (args: { sessionId: string; chatGuid: string; relay?: boolean; typing?: boolean }) =>
+        setTrigger(args.sessionId, args.chatGuid, args.relay !== false, args.typing === true),
     })
   },
 } satisfies Plugin

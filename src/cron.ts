@@ -4,7 +4,10 @@
 //                           "prompt": "…" 或 "promptFile": "绝对路径" } } }
 // 到点把任务提示注入目标会话（next-turn）。调度用 one-shot timeout 链，
 // 每次触发后计算下一次；重启/热重载不会在同一分钟重复触发。
-// 依赖：timer + shell + fs（读任务配置与 promptFile）；复用 lib.ts 的会话解析与注入。
+// 注入成功后若目标会话在绑定表里有 relay: true 的 iMessage 会话，经 bluebubbles
+// 服务的 armRelay 挂上「回复自动投递」——与手机入站消息触发的回合同一模式，
+// 任务 prompt 无需再指示模型手动调用发送工具。
+// 依赖：timer + shell + fs（读任务配置与 promptFile）；bluebubbles 服务可选（relay 投递）。
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 
@@ -16,6 +19,12 @@ interface CronJob {
   target: SessionTarget
   prompt?: string
   promptFile?: string
+}
+
+// bluebubbles-bridge 提供的可选服务（src/index.ts provide('bluebubbles', …)）。
+interface BluebubblesService {
+  listBindings(): Record<string, { sessionId?: string; relay?: boolean }>
+  armRelay(args: { sessionId: string; chatGuid: string; relay?: boolean; typing?: boolean }): Promise<unknown>
 }
 
 // ---- 5 字段 cron（分 时 日 月 周；支持 * , - /；周 0=周日）----
@@ -112,6 +121,25 @@ export default {
       }
     }
 
+    // 目标会话若绑定了 relay: true 的 iMessage 会话，挂上回复自动投递触发。
+    // 绑定表热重读在桥侧，这里直接查服务里的当前表；无绑定/无服务时静默跳过。
+    async function armRelayIfBound(ctx: Context, sessionId: string, label: string): Promise<void> {
+      const bb = getService<BluebubblesService>(ctx, 'bluebubbles')
+      if (!bb) return
+      try {
+        const bindings = bb.listBindings() || {}
+        for (const [key, binding] of Object.entries(bindings)) {
+          if (!key.startsWith('chat:') || !binding) continue
+          if (binding.sessionId !== sessionId || binding.relay !== true) continue
+          await bb.armRelay({ sessionId, chatGuid: key.slice('chat:'.length), relay: true, typing: false })
+          console.log('cron: 已挂 relay 自动投递 ' + label + ' → ' + key.slice('chat:'.length))
+          return
+        }
+      } catch (err) {
+        console.log('cron: relay 挂载失败 ' + label + '：' + (err instanceof Error ? err.message : err))
+      }
+    }
+
     async function fire(label: string): Promise<void> {
       const job = jobs[label]
       if (!job) return
@@ -133,6 +161,7 @@ export default {
         if (!text) text = 'Run the scheduled task "' + label + '".'
         if (sendUserMessage(agents, sessionId, text, 'dsh-cron', 'next-turn')) {
           console.log('cron: 已触发 ' + label + ' → ' + sessionId)
+          await armRelayIfBound(ctx, sessionId, label)
         } else {
           console.log('cron: 目标无活跃 agent，跳过 ' + label)
         }
