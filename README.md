@@ -86,6 +86,8 @@ workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step',
 
 **会话解析链**：`sessionId` 直连 → 否则 `workspacePath` → 该工作区 `sessionIds[0]`（最新会话）→ 校验活跃 agent。无活跃 agent 则丢弃并记日志（不回退、不排队）。
 
+**relay 自动投递（入站与 cron 同模式）**：绑定带 `relay: true` 时，桥为被唤醒的会话登记回复触发（持久化到 `bluebubbles-relay-state.json`，10min TTL，`turn/end` 清除，精确回复 `NO_REPLY` 可抑制）。该回合内每条含 text 部件的 assistant 消息即时发回对应 chatGuid——thinking/工具结果不投递。`dsh-cron` 触发任务时若目标会话有 `relay: true` 绑定，会经 `bluebubbles` 服务的 `armRelay` 挂同一机制，因此**任务 prompt 不应再让模型手动调发送工具**（否则双发）。
+
 ### 更新代码
 
 1. 改 `src/*.ts` → `npm run typecheck` → `git commit`
