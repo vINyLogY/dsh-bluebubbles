@@ -1,10 +1,15 @@
 #!/usr/bin/env node
-// bb-channel — BlueBubbles (iMessage) 命令行工具。
-// 与 dsh 桥插件共享同一套状态文件（~/.dsh/bluebubbles-{bindings,contacts}.json），
-// CLI 改绑定后插件在下一条入站消息时自动热重读。
+// bb-channel — BlueBubbles (iMessage) command-line tool.
+// Shares the same state files with the DSH bridge plugin
+// (~/.dsh/bluebubbles-{bindings,contacts}.json); the plugin hot re-reads them
+// before the next inbound message, so CLI edits take effect immediately.
+// Plain .mjs on purpose: zero dependencies, runs on any modern Node without
+// the >= 23.6 type-stripping the TypeScript plugins require, and stays ESM no
+// matter where the file is symlinked or copied.
 //
-// 凭据链：环境变量 → ~/.dsh/.env → ~/.zshenv（BLUEBUBBLES_PASSWORD / BLUEBUBBLES_BASE_URL）。
-// 输出一律为 pretty JSON（可 jq）；错误写 stderr 且 exit 1。
+// Credential chain: environment → ~/.dsh/.env → ~/.zshenv
+// (BLUEBUBBLES_PASSWORD / BLUEBUBBLES_BASE_URL).
+// Output is always pretty JSON (jq-friendly); errors go to stderr with exit 1.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -16,7 +21,7 @@ const CONTACTS_PATH = process.env.BLUEBUBBLES_CONTACTS || join(DSH_HOME, 'bluebu
 const ENV_PATH = join(DSH_HOME, '.env')
 const DEFAULT_WEBHOOK_URL = 'http://127.0.0.1:3080/bluebubbles/webhook'
 
-// ---------- 配置解析 ----------
+// ---------- config resolution ----------
 function parseEnvFile(path) {
   try {
     const text = readFileSync(path, 'utf8')
@@ -54,7 +59,7 @@ function die(msg) {
 }
 
 function requirePassword() {
-  if (!cfg.password) die('未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），先运行 bb-channel configure --password <pw>')
+  if (!cfg.password) die('BLUEBUBBLES_PASSWORD not found (env / ~/.dsh/.env / ~/.zshenv); run bb-channel configure --password <pw> first')
 }
 
 async function api(method, path, body) {
@@ -66,15 +71,15 @@ async function api(method, path, body) {
     signal: AbortSignal.timeout(30000),
   })
   const parsed = await res.json().catch(() => null)
-  if (!parsed) die('无法解析 BlueBubbles 响应（HTTP ' + res.status + '）')
+  if (!parsed) die('cannot parse BlueBubbles response (HTTP ' + res.status + ')')
   if (typeof parsed.status === 'number' && parsed.status >= 400) {
     const e = parsed.error
-    die('BlueBubbles 错误：' + (e ? (e.message || e.error || e.type || JSON.stringify(e)) : 'HTTP ' + parsed.status))
+    die('BlueBubbles error: ' + (e ? (e.message || e.error || e.type || JSON.stringify(e)) : 'HTTP ' + parsed.status))
   }
   return Object.prototype.hasOwnProperty.call(parsed, 'data') ? parsed.data : parsed
 }
 
-// ---------- 状态文件 ----------
+// ---------- state files ----------
 function readJson(path, fallback) {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return fallback }
 }
@@ -84,7 +89,7 @@ function writeJson(path, value) {
 }
 const contacts = () => readJson(CONTACTS_PATH, {})
 
-// ---------- 展示辅助 ----------
+// ---------- display helpers ----------
 function senderOf(m, cs) {
   const addr = (m.handle && m.handle.address) || (m.isFromMe ? 'me' : '?')
   const name = (!m.isFromMe && cs[addr]) || null
@@ -104,7 +109,8 @@ function compactMessage(m, cs) {
   }
 }
 
-// 噪音过滤：any;-;any 占位会话、无参与者且无显示名的空会话、配对码类系统消息
+// noise filter: the any;-;any placeholder chat, empty chats with neither
+// participants nor a display name, and pairing-code style system messages
 function isNoiseChat(c) {
   if (!c || !c.guid) return true
   if (c.guid === 'any;-;any') return true
@@ -115,26 +121,26 @@ function isNoiseChat(c) {
   return false
 }
 
-// ---------- 子命令 ----------
+// ---------- subcommands ----------
 const HELP = `bb-channel — BlueBubbles (iMessage) CLI
 
-用法: bb-channel <命令> [参数]
+Usage: bb-channel <command> [args]
 
-  ping                                  连通性/鉴权检查
-  chats [--limit N] [--all]             列出会话（默认过滤占位/配对码噪音，--all 全量）
-  messages <chatGuid> [--limit N]       读最近消息（带发送者显示名）
-  send <chatGuid> <文本...>             发文本（--method private-api 可选）
-  send-attachment <chatGuid> <文件> [--name X]   发附件（默认 private-api）
-  attachment <guid> [--name X] [--dir D]       下载附件（默认存 $DSH_HOME/bluebubbles-media）
-  bind <chatGuid> (--workspace PATH | --session ID) [--relay] [--no-typing]   绑定会话到 DSH 工作区/会话
-  unbind <chatGuid>                     解绑
-  bindings                              查看绑定表
-  contacts                              查看通讯录（地址 → 显示名）
-  set-contact <地址> <名字>              写通讯录（注入消息和 messages 输出都会用）
-  webhook [--url URL]                   查看/确保 DSH webhook 已注册
-  configure [--base-url URL] [--password PW]   写入 ~/.dsh/.env
+  ping                                  connectivity/auth check
+  chats [--limit N] [--all]             list chats (placeholder/pairing-code noise hidden unless --all)
+  messages <chatGuid> [--limit N]       read recent messages (with sender display names)
+  send <chatGuid> <text...>             send text (--method private-api optional)
+  send-attachment <chatGuid> <file> [--name X]   send an attachment (private-api default)
+  attachment <guid> [--name X] [--dir D]       download an attachment (defaults into $DSH_HOME/bluebubbles-media)
+  bind <chatGuid> (--workspace PATH | --session ID) [--relay] [--no-typing]   bind a chat to a DSH workspace/session
+  unbind <chatGuid>                     remove a binding
+  bindings                              show the binding table
+  contacts                              show the address book (address → display name)
+  set-contact <address> <name>          write the address book (used by injected messages and messages output)
+  webhook [--url URL]                   check/ensure the DSH webhook is registered
+  configure [--base-url URL] [--password PW]   write ~/.dsh/.env
 
-凭据链: 环境变量 → ~/.dsh/.env → ~/.zshenv。输出为 JSON，可 jq。`
+Credential chain: environment → ~/.dsh/.env → ~/.zshenv. Output is JSON, jq-friendly.`
 
 function argValue(args, flag) {
   const i = args.indexOf(flag)
@@ -193,7 +199,7 @@ async function main() {
     }
 
     case 'messages': {
-      const chatGuid = pos[0] || die('messages 需要 <chatGuid>')
+      const chatGuid = pos[0] || die('messages requires <chatGuid>')
       const limit = Math.min(Math.max(parseInt(argValue(rest, '--limit') || '25', 10) || 25, 1), 100)
       const data = await api('GET', 'chat/' + encodeURIComponent(chatGuid) + '/message?limit=' + limit + '&sort=DESC')
       const cs = contacts()
@@ -202,8 +208,8 @@ async function main() {
     }
 
     case 'send': {
-      const chatGuid = pos[0] || die('send 需要 <chatGuid> <文本>')
-      const text = pos.slice(1).join(' ') || die('send 需要文本内容')
+      const chatGuid = pos[0] || die('send requires <chatGuid> <text>')
+      const text = pos.slice(1).join(' ') || die('send requires text content')
       const method = argValue(rest, '--method') || 'apple-script'
       const tempGuid = 'bbcli-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
       const data = await api('POST', 'message/text', { chatGuid, tempGuid, message: text, method })
@@ -212,9 +218,9 @@ async function main() {
     }
 
     case 'send-attachment': {
-      const chatGuid = pos[0] || die('send-attachment 需要 <chatGuid> <文件路径>')
-      const filePath = pos[1] || die('send-attachment 需要文件路径')
-      if (!existsSync(filePath)) die('文件不存在：' + filePath)
+      const chatGuid = pos[0] || die('send-attachment requires <chatGuid> <file>')
+      const filePath = pos[1] || die('send-attachment requires a file path')
+      if (!existsSync(filePath)) die('file not found: ' + filePath)
       const name = argValue(rest, '--name') || basename(filePath)
       const method = argValue(rest, '--method') || 'private-api'
       const tempGuid = 'bbcli-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
@@ -229,20 +235,20 @@ async function main() {
       const res = await fetch(url('message/attachment'), { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
       const parsed = await res.json().catch(() => null)
       if (!parsed || (typeof parsed.status === 'number' && parsed.status >= 400)) {
-        die('发送失败：' + JSON.stringify(parsed && parsed.error ? parsed.error : parsed))
+        die('send failed: ' + JSON.stringify(parsed && parsed.error ? parsed.error : parsed))
       }
       out({ ok: true, guid: (parsed.data && parsed.data.guid) || null, name })
       return
     }
 
     case 'attachment': {
-      const guid = pos[0] || die('attachment 需要 <guid>')
+      const guid = pos[0] || die('attachment requires <guid>')
       const name = (argValue(rest, '--name') || 'attachment').replace(/[^\w.\-]+/g, '_').slice(0, 80)
       const dir = argValue(rest, '--dir') || join(DSH_HOME, 'bluebubbles-media')
       mkdirSync(dir, { recursive: true })
       requirePassword()
       const res = await fetch(url('attachment/' + encodeURIComponent(guid) + '/download'), { signal: AbortSignal.timeout(60000) })
-      if (!res.ok) die('下载失败：HTTP ' + res.status)
+      if (!res.ok) die('download failed: HTTP ' + res.status)
       const filePath = join(dir, guid + '-' + name)
       writeFileSync(filePath, Buffer.from(await res.arrayBuffer()))
       out({ ok: true, guid, path: filePath })
@@ -250,23 +256,24 @@ async function main() {
     }
 
     case 'bind': {
-      const chatGuid = pos[0] || die('bind 需要 <chatGuid>')
+      const chatGuid = pos[0] || die('bind requires <chatGuid>')
       const workspace = argValue(rest, '--workspace')
       const session = argValue(rest, '--session')
-      if (!workspace && !session) die('bind 需要 --workspace PATH 或 --session ID')
+      if (!workspace && !session) die('bind requires --workspace PATH or --session ID')
       const binding = session ? { sessionId: session } : { workspacePath: workspace }
-      // --relay：iMessage 触发的回合自动把文本回复投递回来；--no-typing：关「正在输入」指示（缺省开）
+      // --relay: auto-deliver text replies of iMessage-triggered turns back to the
+      // chat; --no-typing: disable the "typing…" indicator (on by default)
       if (hasFlag(rest, '--relay')) binding.relay = true
       if (hasFlag(rest, '--no-typing')) binding.typing = false
       const bindings = readJson(BINDINGS_PATH, {})
       bindings['chat:' + chatGuid] = binding
       writeJson(BINDINGS_PATH, bindings)
-      out({ ok: true, key: 'chat:' + chatGuid, binding, note: '插件在下一条入站消息时热生效' })
+      out({ ok: true, key: 'chat:' + chatGuid, binding, note: 'the plugin hot-applies this on the next inbound message' })
       return
     }
 
     case 'unbind': {
-      const chatGuid = pos[0] || die('unbind 需要 <chatGuid>')
+      const chatGuid = pos[0] || die('unbind requires <chatGuid>')
       const bindings = readJson(BINDINGS_PATH, {})
       const existed = Object.prototype.hasOwnProperty.call(bindings, 'chat:' + chatGuid)
       delete bindings['chat:' + chatGuid]
@@ -284,8 +291,8 @@ async function main() {
       return
 
     case 'set-contact': {
-      const addr = pos[0] || die('set-contact 需要 <地址> <名字>')
-      const name = pos[1] || die('set-contact 需要 <名字>')
+      const addr = pos[0] || die('set-contact requires <address> <name>')
+      const name = pos[1] || die('set-contact requires <name>')
       const cs = contacts()
       cs[addr] = name
       writeJson(CONTACTS_PATH, cs)
@@ -297,7 +304,7 @@ async function main() {
       const webhookUrl = argValue(rest, '--url') || DEFAULT_WEBHOOK_URL
       const list = await api('GET', 'webhook')
       const existing = Array.isArray(list) ? list.find((w) => w && w.url === webhookUrl) : null
-      if (existing) { out({ ok: true, registered: true, id: existing.id, url: webhookUrl, note: '已存在' }); return }
+      if (existing) { out({ ok: true, registered: true, id: existing.id, url: webhookUrl, note: 'already exists' }); return }
       const created = await api('POST', 'webhook', { url: webhookUrl, events: ['new-message'] })
       out({ ok: true, registered: true, id: (created && created.id) || null, url: webhookUrl })
       return
@@ -306,7 +313,7 @@ async function main() {
     case 'configure': {
       const baseUrl = argValue(rest, '--base-url')
       const password = argValue(rest, '--password')
-      if (!baseUrl && !password) die('configure 需要 --base-url 和/或 --password')
+      if (!baseUrl && !password) die('configure requires --base-url and/or --password')
       let text = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
       const upsert = (t, key, value) => {
         const re = new RegExp('^\\s*#?\\s*' + key + '=.*$', 'm')
@@ -315,12 +322,12 @@ async function main() {
       if (password) text = upsert(text, 'BLUEBUBBLES_PASSWORD', password)
       if (baseUrl) text = upsert(text, 'BLUEBUBBLES_BASE_URL', baseUrl)
       writeFileSync(ENV_PATH, text)
-      out({ ok: true, envPath: ENV_PATH, hasPassword: !!(password || cfg.password), baseUrl: baseUrl || cfg.baseUrl, note: 'DSH 进程下次重启或桥热重载时生效' })
+      out({ ok: true, envPath: ENV_PATH, hasPassword: !!(password || cfg.password), baseUrl: baseUrl || cfg.baseUrl, note: 'takes effect on the next DSH restart or bridge reload' })
       return
     }
 
     default:
-      die('未知命令：' + cmd + '（bb-channel help 查看用法）')
+      die('unknown command: ' + cmd + ' (see bb-channel help)')
   }
 }
 

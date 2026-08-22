@@ -1,13 +1,17 @@
-// dsh-cron — 通用 cron 组件（与任何频道无关）。
-// 自持任务配置：$DSH_HOME/cron-jobs.json
-//   { "jobs": { "标签": { "schedule": "5 9 * * *", "target": { workspacePath|sessionId },
-//                           "prompt": "…" 或 "promptFile": "绝对路径" } } }
-// 到点把任务提示注入目标会话（next-turn）。调度用 one-shot timeout 链，
-// 每次触发后计算下一次；重启/热重载不会在同一分钟重复触发。
-// 注入成功后若目标会话在绑定表里有 relay: true 的 iMessage 会话，经 bluebubbles
-// 服务的 armRelay 挂上「回复自动投递」——与手机入站消息触发的回合同一模式，
-// 任务 prompt 无需再指示模型手动调用发送工具。
-// 依赖：timer + shell + fs（读任务配置与 promptFile）；bluebubbles 服务可选（relay 投递）。
+// dsh-cron — generic cron runner, channel-agnostic.
+// Owns its job config: $DSH_HOME/cron-jobs.json
+//   { "jobs": { "label": { "schedule": "5 9 * * *", "target": { workspacePath|sessionId },
+//                          "prompt": "…" or "promptFile": "absolute path" } } }
+// At each scheduled minute the prompt is injected into the target session
+// (next-turn). Scheduling is a one-shot timeout chain: after every fire the
+// next hit is recomputed, so a restart/hot reload never double-fires the
+// current minute.
+// After a successful injection, if the target session has a relay:true iMessage
+// binding, armRelay on the bluebubbles service attaches auto-delivery of the
+// session's replies — the same mode as phone-inbound turns, so task prompts
+// must NOT tell the model to call send tools itself.
+// Depends on timer + shell + fs (reads its own config and promptFile);
+// the bluebubbles service is optional (relay delivery only).
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 
@@ -21,13 +25,13 @@ interface CronJob {
   promptFile?: string
 }
 
-// bluebubbles-bridge 提供的可选服务（src/index.ts provide('bluebubbles', …)）。
+// Optional service provided by bluebubbles-bridge (src/index.ts provide('bluebubbles', …)).
 interface BluebubblesService {
   listBindings(): Record<string, { sessionId?: string; relay?: boolean }>
   armRelay(args: { sessionId: string; chatGuid: string; relay?: boolean; typing?: boolean }): Promise<unknown>
 }
 
-// ---- 5 字段 cron（分 时 日 月 周；支持 * , - /；周 0=周日）----
+// ---- 5-field cron (min hour dom month dow; * , - / supported; dow 0=Sunday) ----
 function parseField(field: string, min: number, max: number): number[] | null {
   const out = new Set<number>()
   for (const part of field.split(',')) {
@@ -65,7 +69,7 @@ function parseSchedule(s: string): ScheduleMatch | null {
   return (d) => mins.includes(d.getMinutes()) && hours.includes(d.getHours()) && doms.includes(d.getDate()) && months.includes(d.getMonth() + 1) && dows.includes(d.getDay())
 }
 
-/** 从 from（不含当分钟）起找下一个命中时刻，最多看 730 天。 */
+/** Next hit after `from` (exclusive of the current minute), scanning at most 730 days ahead. */
 function nextRunAfter(match: ScheduleMatch, from: Date, capDays = 730): Date | null {
   const t = new Date(from.getTime())
   t.setSeconds(0, 0)
@@ -104,25 +108,28 @@ export default {
         const raw = root && root.jobs && typeof root.jobs === 'object' ? root.jobs : {}
         for (const [label, job] of Object.entries(raw)) {
           if (!job || typeof job.schedule !== 'string' || !job.target || (!job.target.workspacePath && !job.target.sessionId)) {
-            console.log('cron: 跳过非法任务 ' + label)
+            console.log('cron: skipping invalid job ' + label)
             continue
           }
           const match = parseSchedule(job.schedule)
           if (!match) {
-            console.log('cron: 跳过非法 schedule（' + job.schedule + '）任务 ' + label)
+            console.log('cron: skipping job ' + label + ' with invalid schedule (' + job.schedule + ')')
             continue
           }
           jobs[label] = job
           matches[label] = match
         }
-        console.log('cron: 已载入 ' + Object.keys(jobs).length + ' 个任务')
+        console.log('cron: loaded ' + Object.keys(jobs).length + ' jobs')
       } catch (err) {
-        console.log('cron: 任务配置载入跳过：' + (err instanceof Error ? err.message : err))
+        console.log('cron: job config load skipped: ' + (err instanceof Error ? err.message : err))
       }
     }
 
-    // 目标会话若绑定了 relay: true 的 iMessage 会话，挂上回复自动投递触发。
-    // 绑定表热重读在桥侧，这里直接查服务里的当前表；无绑定/无服务时静默跳过。
+    // Arm reply auto-delivery when the target session has a relay:true iMessage
+    // binding. The bridge hot-reloads the binding file on inbound messages; this
+    // service view is current enough for cron. No binding / no service = skip
+    // silently. Known limitation: only sessionId bindings match here; a
+    // workspacePath binding is not reverse-resolved.
     async function armRelayIfBound(ctx: Context, sessionId: string, label: string): Promise<void> {
       const bb = getService<BluebubblesService>(ctx, 'bluebubbles')
       if (!bb) return
@@ -132,11 +139,11 @@ export default {
           if (!key.startsWith('chat:') || !binding) continue
           if (binding.sessionId !== sessionId || binding.relay !== true) continue
           await bb.armRelay({ sessionId, chatGuid: key.slice('chat:'.length), relay: true, typing: false })
-          console.log('cron: 已挂 relay 自动投递 ' + label + ' → ' + key.slice('chat:'.length))
+          console.log('cron: relay armed ' + label + ' → ' + key.slice('chat:'.length))
           return
         }
       } catch (err) {
-        console.log('cron: relay 挂载失败 ' + label + '：' + (err instanceof Error ? err.message : err))
+        console.log('cron: relay arm failed ' + label + ': ' + (err instanceof Error ? err.message : err))
       }
     }
 
@@ -146,7 +153,7 @@ export default {
       try {
         const sessionId = await resolveSession(workspaces, job.target)
         if (!sessionId) {
-          console.log('cron: 目标无会话，跳过 ' + label)
+          console.log('cron: target has no session, skipping ' + label)
           return
         }
         let text = typeof job.prompt === 'string' && job.prompt !== '' ? job.prompt : ''
@@ -155,18 +162,18 @@ export default {
             const target = await fs.resolve(job.promptFile)
             text = await fs.readText(target)
           } catch (err) {
-            console.log('cron: promptFile 读取失败 ' + label + '：' + (err instanceof Error ? err.message : err))
+            console.log('cron: promptFile read failed ' + label + ': ' + (err instanceof Error ? err.message : err))
           }
         }
         if (!text) text = 'Run the scheduled task "' + label + '".'
         if (sendUserMessage(agents, sessionId, text, 'dsh-cron', 'next-turn')) {
-          console.log('cron: 已触发 ' + label + ' → ' + sessionId)
+          console.log('cron: fired ' + label + ' → ' + sessionId)
           await armRelayIfBound(ctx, sessionId, label)
         } else {
-          console.log('cron: 目标无活跃 agent，跳过 ' + label)
+          console.log('cron: target has no live agent, skipping ' + label)
         }
       } catch (err) {
-        console.log('cron: 触发失败 ' + label + '：' + (err instanceof Error ? err.message : err))
+        console.log('cron: fire failed ' + label + ': ' + (err instanceof Error ? err.message : err))
       }
     }
 
@@ -178,7 +185,7 @@ export default {
         if (next && (!best || next.getTime() < best.at.getTime())) best = { label, at: next }
       }
       if (!best) {
-        console.log('cron: 未来 730 天内无命中')
+        console.log('cron: no hit within the next 730 days')
         return
       }
       const delay = Math.max(1000, best.at.getTime() - Date.now() + 100)
@@ -186,13 +193,13 @@ export default {
         void fire(best.label)
         scheduleNext()
       }, delay)
-      console.log('cron: 下一任务 "' + best.label + '" 于 ' + best.at.toLocaleString() + '（' + Math.round(delay / 60000) + ' 分钟后）')
+      console.log('cron: next job "' + best.label + '" at ' + best.at.toLocaleString() + ' (in ' + Math.round(delay / 60000) + ' min)')
     }
 
     const bootstrap = async () => {
       await loadJobs()
       if (Object.keys(matches).length === 0) {
-        console.log('cron: 未启用（' + jobsPath + ' 为空或不存在）')
+        console.log('cron: disabled (' + jobsPath + ' empty or missing)')
         return
       }
       scheduleNext()

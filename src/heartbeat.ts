@@ -1,8 +1,9 @@
-// dsh-heartbeat — 通用心跳组件（与任何频道无关）。
-// 自持目标配置：$DSH_HOME/heartbeat-targets.json
-//   { "标签": { "workspacePath": "…" } 或 { "sessionId": "…" }, "heartbeatMd": "可选自定义路径" }
-// 定时向目标会话注入 HEARTBEAT 提示（默认读工作区根的 HEARTBEAT.md）。
-// 依赖：timer + shell + fs（只读自己的配置文件）；不依赖 bluebubbles。
+// dsh-heartbeat — generic periodic wake-up, channel-agnostic.
+// Owns its target config: $DSH_HOME/heartbeat-targets.json
+//   { "label": { "workspacePath": "…" } or { "sessionId": "…" }, "heartbeatMd": "optional custom path" }
+// Injects a HEARTBEAT prompt into the target session on an interval (the
+// default prompt reads HEARTBEAT.md at the workspace root).
+// Depends on timer + shell + fs (reads only its own config); no bluebubbles.
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
@@ -39,10 +40,10 @@ export default {
         const parsed: unknown = JSON.parse(text)
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           targets = parsed as Record<string, HeartbeatTarget>
-          console.log('hb: 已载入心跳目标（' + Object.keys(parsed).length + ' 个）')
+          console.log('hb: loaded heartbeat targets (' + Object.keys(parsed).length + ')')
         }
       } catch (err) {
-        console.log('hb: 心跳目标载入跳过：' + (err instanceof Error ? err.message : err))
+        console.log('hb: heartbeat target load skipped: ' + (err instanceof Error ? err.message : err))
       }
     }
 
@@ -58,10 +59,10 @@ export default {
             ? 'Read ' + target.heartbeatMd + ' (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
             : DEFAULT_PROMPT
           if (sendUserMessage(agents, sessionId, prompt, 'dsh-heartbeat', 'next-turn')) {
-            console.log('hb: 心跳已投递 → ' + label)
+            console.log('hb: heartbeat delivered → ' + label)
           }
         } catch (err) {
-          console.log('hb: 心跳投递失败 ' + label + '：' + (err instanceof Error ? err.message : err))
+          console.log('hb: heartbeat delivery failed ' + label + ': ' + (err instanceof Error ? err.message : err))
         }
       }
     }
@@ -69,7 +70,7 @@ export default {
     const bootstrap = async () => {
       await loadTargets()
       if (Object.keys(targets).length === 0) {
-        console.log('hb: 未启用（' + targetsPath + ' 为空或不存在）')
+        console.log('hb: disabled (' + targetsPath + ' empty or missing)')
         return
       }
       let raw = process.env.HEARTBEAT_INTERVAL
@@ -79,12 +80,14 @@ export default {
       }
       const parsed = parseInterval(raw)
       const heartbeatMs = parsed !== null && parsed >= 60000 ? parsed : 12 * 60 * 60 * 1000
+      // Align the first tick to the wall-clock interval boundary so a restart
+      // does not shift the daily rhythm by whenever the process happened to boot.
       const firstDelay = heartbeatMs - (Date.now() % heartbeatMs)
       ctx.effect(() => timer.timeout(() => {
         void tick()
         timer.interval(() => { void tick() }, heartbeatMs)
       }, firstDelay), 'heartbeat')
-      console.log('hb: 已启用，间隔 ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h，' + Math.round(firstDelay / 60000) + ' 分钟后首次触发')
+      console.log('hb: enabled, interval ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h, first tick in ' + Math.round(firstDelay / 60000) + ' min')
     }
     void bootstrap()
   },

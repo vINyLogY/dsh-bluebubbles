@@ -21,9 +21,9 @@ interface WebServerService {
 interface Binding {
   workspacePath?: string
   sessionId?: string
-  /** iMessage 触发的回合：自动把 assistant 文本回复投递回该 iMessage 会话（免工具约定） */
+  /** For iMessage-triggered turns: auto-deliver assistant text replies back to that chat (no tool call needed) */
   relay?: boolean
-  /** iMessage 触发的回合：工作期间向对方显示「正在输入」（缺省开） */
+  /** For iMessage-triggered turns: show "typing…" to the peer while working (on by default) */
   typing?: boolean
 }
 
@@ -47,7 +47,7 @@ export default {
       relayStatePath: (process.env.BLUEBUBBLES_RELAY_STATE || dshHome + '/bluebubbles-relay-state.json') as string,
     }
 
-    // ================= HTTP 辅助（经 shell 跑 curl：web 服务只支持 GET） =================
+    // ================= HTTP helpers (curl via the shell service: the host web service only accepts GET) =================
     function base(): string {
       return state.baseUrl.replace(/\/+$/, '')
     }
@@ -74,13 +74,13 @@ export default {
       const run: ShellRunResult = await ctx.shell.run(spec)
       if (run.exitCode !== 0) {
         const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : (run.stdout ? run.stdout.text : '')).trim()
-        return { ok: false, error: 'curl 退出码 ' + run.exitCode + (run.timedOut ? '（超时）' : '') + (detail ? '：' + detail.slice(0, 300) : '') }
+        return { ok: false, error: 'curl exit ' + run.exitCode + (run.timedOut ? ' (timeout)' : '') + (detail ? ': ' + detail.slice(0, 300) : '') }
       }
       let parsed: any = null
       try {
         parsed = JSON.parse((run.stdout && run.stdout.text) || '')
       } catch {
-        return { ok: false, error: '无法解析 BlueBubbles 响应：' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
+        return { ok: false, error: 'cannot parse BlueBubbles response: ' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
       }
       if (parsed && typeof parsed.status === 'number' && parsed.status >= 400) {
         const detail = parsed.error ? (parsed.error.message || parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
@@ -94,7 +94,7 @@ export default {
       const url = endpoint(path)
       const parts: string[] = ["curl -sS -m 60 -X POST"]
       for (const [key, value] of Object.entries(fields)) {
-        // --form-string：值按字面传递，chatGuid 里的 ';' '+' 不会被 curl 的 -F 语法吞掉
+        // --form-string passes values literally; a chatGuid containing ';' or '+' would be mangled by curl's -F syntax
         parts.push("--form-string '" + shEscape(key + '=' + value) + "'")
       }
       parts.push("-F 'attachment=@" + shEscape(filePath) + ";filename=" + shEscape(fileName) + "'")
@@ -104,13 +104,13 @@ export default {
       const run: ShellRunResult = await ctx.shell.run(spec)
       if (run.exitCode !== 0) {
         const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : (run.stdout ? run.stdout.text : '')).trim()
-        return { ok: false, error: 'curl 退出码 ' + run.exitCode + (run.timedOut ? '（超时）' : '') + (detail ? '：' + detail.slice(0, 300) : '') }
+        return { ok: false, error: 'curl exit ' + run.exitCode + (run.timedOut ? ' (timeout)' : '') + (detail ? ': ' + detail.slice(0, 300) : '') }
       }
       let parsed: any = null
       try {
         parsed = JSON.parse((run.stdout && run.stdout.text) || '')
       } catch {
-        return { ok: false, error: '无法解析 BlueBubbles 响应：' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
+        return { ok: false, error: 'cannot parse BlueBubbles response: ' + ((run.stdout && run.stdout.text) || '').slice(0, 300) }
       }
       if (parsed && typeof parsed.status === 'number' && parsed.status >= 400) {
         const detail = parsed.error ? (parsed.error.message || parsed.error.error || parsed.error.type || JSON.stringify(parsed.error)) : (parsed.message || 'HTTP ' + parsed.status)
@@ -120,7 +120,7 @@ export default {
       return { ok: true, data: hasData ? parsed.data : parsed }
     }
 
-    // ================= 精简序列化 =================
+    // ================= compact serializers =================
     function compactMessage(m: Record<string, any>): Record<string, unknown> {
       return {
         guid: m.guid,
@@ -143,7 +143,7 @@ export default {
       }
     }
 
-    // ================= 业务函数 =================
+    // ================= business operations =================
     async function ping(): Promise<Record<string, unknown>> {
       const started = Date.now()
       const result = await curl('GET', 'ping', null)
@@ -208,8 +208,9 @@ export default {
       return { ok: true, tempGuid, name, guid: sentGuid }
     }
 
-    // ================= 状态文件（绑定表 + 通讯录） =================
-    // 两者都由 bb-channel CLI 直接编辑，插件在每条入站消息前重读，天然热更新。
+    // ================= state files (bindings + contacts) =================
+    // Both are edited directly by the bb-channel CLI; re-reading them before
+    // every inbound message gives hot updates with no reload machinery.
     async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
       if (!fs) return null
       try {
@@ -217,7 +218,7 @@ export default {
         const parsed: unknown = JSON.parse(await fs.readText(target))
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
       } catch {
-        // 文件不存在或损坏 = 视为空
+        // missing or corrupt file = treat as empty
       }
       return null
     }
@@ -226,7 +227,7 @@ export default {
       const b = await readJsonFile(state.bindingsPath)
       if (b) {
         state.bindings = b as unknown as Record<string, Binding>
-        if (log) console.log('bb: 已载入绑定表（' + Object.keys(b).length + ' 条）')
+        if (log) console.log('bb: loaded bindings (' + Object.keys(b).length + ')')
       }
       const c = await readJsonFile(state.contactsPath)
       if (c) state.contacts = c as Record<string, string>
@@ -235,26 +236,26 @@ export default {
     async function saveBindings(): Promise<void> {
       if (!fs) return
       try {
-        // shell 执行器会丢弃环境里的 DSH_* 托管变量，这里用 JS 侧算好的目录
+        // the shell executor strips managed DSH_* env vars, so derive the directory JS-side
         const dir = state.bindingsPath.replace(/\/[^/]*$/, '')
         await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
         const target = await fs.resolve(state.bindingsPath)
         await fs.writeText(target, JSON.stringify(state.bindings, null, 2))
       } catch (err) {
-        console.log('bb: 绑定表写盘失败（降级为内存态）：' + (err instanceof Error ? err.message : err))
+        console.log('bb: bindings write failed (degrading to in-memory): ' + (err instanceof Error ? err.message : err))
       }
     }
 
-    // ================= webhook：BlueBubbles 自注册 =================
+    // ================= webhook: self-registration with BlueBubbles =================
     const WEBHOOK_URL = 'http://127.0.0.1:3080/bluebubbles/webhook'
 
     async function ensureWebhook(): Promise<Record<string, unknown>> {
-      if (!webServer) return { ok: false, registered: false, error: 'webServer 服务不可用，无法接收推送' }
-      if (state.password === '') return { ok: false, registered: false, error: '尚未配置 BlueBubbles 密码' }
-      // 幂等：先查后建，不依赖服务端对重复 URL 的去重行为
+      if (!webServer) return { ok: false, registered: false, error: 'webServer service unavailable; cannot receive pushes' }
+      if (state.password === '') return { ok: false, registered: false, error: 'BlueBubbles password not configured' }
+      // idempotent: check before create, never rely on server-side dedup of duplicate URLs
       const list = await curl('GET', 'webhook', null)
       const existing = list.ok && Array.isArray(list.data) ? list.data.find((w: any) => w && w.url === WEBHOOK_URL) : null
-      if (existing) return { ok: true, registered: true, id: existing.id, url: WEBHOOK_URL, note: '已存在' }
+      if (existing) return { ok: true, registered: true, id: existing.id, url: WEBHOOK_URL, note: 'already exists' }
       const created = await curl('POST', 'webhook', { url: WEBHOOK_URL, events: ['new-message'] })
       if (created.ok) {
         const data = created.data as any
@@ -263,14 +264,15 @@ export default {
       return { ok: false, registered: false, error: created.error }
     }
 
-    // ================= webhook 事件处理（含消息级去重） =================
+    // ================= webhook event handling (with message-level dedup) =================
     const seenGuids = new Set<string>()
     const SEEN_GUIDS_MAX = 500
-    // 防自循环：发送前登记待发（chat+text），webhook 回显 isFromMe 消息时按此匹配丢弃。
-    // BlueBubbles webhook 不回显 tempGuid，故 tempGuid 过滤不足以防环；此处为主防线。
+    // Anti-self-loop: every send is recorded as (chat, text) first; webhook echoes
+    // of isFromMe messages are matched against this queue and dropped. This is the
+    // primary defense because the webhook does not always echo tempGuid back.
     const pendingSent: Array<{ chat: string; text: string; at: number }> = []
     const PENDING_TTL = 60000
-    // webhook 与 REST 的文本可能 unicode 归一化不同（NFC/NFD），比较前统一归一
+    // webhook and REST texts may differ in unicode normalization (NFC/NFD); normalize before comparing
     function normText(t: string): string { return t.normalize('NFC').trim() }
     function noteSent(chat: string, text: string): void {
       pendingSent.push({ chat, text: normText(text), at: Date.now() })
@@ -327,26 +329,28 @@ export default {
         return
       }
       res.statusCode = 200
-      res.end('ok-v30')
+      // Version marker must match the ?v=N in the host cordis.patch.yml row —
+      // README's update procedure verifies the live build through this string.
+      res.end('ok-v31')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
       } catch {
         return
       }
-      processEvent(event).catch((err) => console.log('bb: 处理 webhook 事件失败：' + (err instanceof Error ? err.message : err)))
+      processEvent(event).catch((err) => console.log('bb: webhook event handling failed: ' + (err instanceof Error ? err.message : err)))
     }
 
-    // ================= 附件下载（收图片） =================
+    // ================= attachment download (inbound media) =================
     function fmtBytes(n: number): string {
       if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
       if (n >= 1024) return Math.round(n / 1024) + 'KB'
       return n + 'B'
     }
 
-    // ---- 诊断面包屑（BLUEBUBBLES_DEBUG=1 时写入 $DSH_HOME/bluebubbles-debug.log）----
+    // ---- diagnostic breadcrumbs (BLUEBUBBLES_DEBUG=1 writes to $DSH_HOME/bluebubbles-debug.log) ----
     let debugEnabled = process.env.BLUEBUBBLES_DEBUG === '1'
-    // 串行化写队列：read-modify-write 并发会丢行，链式追加保证面包屑完整
+    // serialized write queue: concurrent read-modify-write would lose lines; chained appends keep breadcrumbs intact
     let dbgQueue: Promise<void> = Promise.resolve()
     async function dbg(line: string): Promise<void> {
       if (!debugEnabled || !fs) return
@@ -357,18 +361,19 @@ export default {
           try {
             prev = await fs.readText(await fs.resolve(path))
           } catch {
-            // 文件不存在 = 从空开始
+            // missing file = start from empty
           }
           await fs.writeText(await fs.resolve(path), prev + new Date().toISOString() + ' ' + line + '\n')
         } catch {
-          // 诊断失败不影响主流程
+          // diagnostics must never affect the main flow
         }
       }
       dbgQueue = dbgQueue.then(write)
       await dbgQueue
     }
 
-    async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
+    async function downloadAttachment(guid: string, name: string, targetDir?: string): Promise<string | null> {
+      const dir = targetDir && targetDir !== '' ? targetDir : dshHome + '/bluebubbles-media'
       const safe = (name.replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'attachment')
       const filePath = dir + '/' + guid + '-' + safe
       try {
@@ -379,12 +384,12 @@ export default {
         const run = await ctx.shell.run(spec)
         if (run.exitCode !== 0) {
           const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : '').trim()
-          console.log('bb: 附件下载失败 ' + guid + '：' + (detail || 'exit ' + run.exitCode))
+          console.log('bb: attachment download failed ' + guid + ': ' + (detail || 'exit ' + run.exitCode))
           return null
         }
         return filePath
       } catch (err) {
-        console.log('bb: 附件下载异常 ' + guid + '：' + (err instanceof Error ? err.message : err))
+        console.log('bb: attachment download error ' + guid + ': ' + (err instanceof Error ? err.message : err))
         return null
       }
     }
@@ -398,13 +403,18 @@ export default {
       await dbg('event guid=' + (m.guid || '?') + ' isFromMe=' + m.isFromMe + ' sender=' + (m.handle && m.handle.address || '?') + ' tempGuid=' + (m.tempGuid || '?') + ' chats0=' + ((Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || '?') + ' text=' + String(text || '').slice(0, 40))
       if (!hasText && attachments.length === 0) { await dbg('drop:empty text&atts'); return }
       if (m.isFromMe) {
-        // 自己账号发出的消息：匹配待发队列则为本桥所发（丢弃防环）；
-        // 否则是用户从手机/Mac 亲手发的（自聊会话里手机消息也是 isFromMe=true），放行。
+        // Messages from our own account: a pendingSent match means this bridge sent
+        // it (drop, anti-loop); otherwise the user typed it on the phone/Mac — in a
+        // self-chat DM those arrive with isFromMe=true too — so let it through.
         const chat0 = (Array.isArray(m.chats) && m.chats[0]) || null
         if (matchPending(chat0 ? chat0.guid : null, typeof text === 'string' ? text : '')) { await dbg('drop:pendingSent'); return }
         await dbg('note:isFromMe passthrough')
       }
-      if (m.tempGuid && String(m.tempGuid).indexOf('dsh-') === 0) { await dbg('drop:tempGuid'); return }
+      // Machine-originated sends echo back over the webhook; both prefixes must be
+      // dropped or a reply sent via the bb-channel CLI would be re-injected into the
+      // bound session as if the user had sent it (self-loop). pendingSent cannot
+      // catch CLI sends: that queue only tracks plugin-side tool sends.
+      if (m.tempGuid && (String(m.tempGuid).indexOf('dsh-') === 0 || String(m.tempGuid).indexOf('bbcli-') === 0)) { await dbg('drop:tempGuid'); return }
       const guid = typeof m.guid === 'string' ? m.guid : null
       if (guid) {
         if (seenGuids.has(guid)) { await dbg('drop:seenGuid ' + guid); return }
@@ -420,7 +430,7 @@ export default {
       const sender: string | null = (m.handle && m.handle.address) || null
       const chatName: string = chat ? (chat.displayName || '') : ''
 
-      // 每条消息前热重读绑定表/通讯录（CLI 可能刚改过）
+      // hot re-read of bindings/contacts before every message (the CLI may have just edited them)
       await reloadStateFiles(false)
 
       const keys: string[] = []
@@ -435,24 +445,24 @@ export default {
       }
       if (!binding) {
         await dbg('drop:no-binding keys=' + JSON.stringify(keys) + ' bindings=' + JSON.stringify(Object.keys(state.bindings)))
-        console.log('bb: 未绑定会话，忽略消息（' + (chatName || sender || chatGuid || '未知') + '）')
+        console.log('bb: unbound chat, message ignored (' + (chatName || sender || chatGuid || 'unknown') + ')')
         return
       }
 
       const sessionId = await resolveSession(workspaces, binding)
       if (!sessionId) {
         await dbg('drop:no-session binding=' + JSON.stringify(binding) + ' wsSvc=' + (workspaces ? 'yes' : 'NO'))
-        console.log('bb: 绑定目标无会话：' + JSON.stringify(binding))
+        console.log('bb: binding target has no session: ' + JSON.stringify(binding))
         return
       }
       const agent = agents ? agents.get(sessionId) : undefined
       if (!agent) {
         await dbg('drop:no-agent session=' + sessionId + ' agentsSvc=' + (agents ? 'yes' : 'NO'))
-        console.log('bb: 目标会话无活跃 agent：' + sessionId)
+        console.log('bb: target session has no live agent: ' + sessionId)
         return
       }
 
-      // 附件：统一存 $DSH_HOME/bluebubbles-media（agent 需要时自行复制进工作区）
+      // attachments all land in $DSH_HOME/bluebubbles-media (the agent copies them into the workspace when needed)
       const mediaDir = dshHome + '/bluebubbles-media'
       let attachmentBlock = ''
       if (attachments.length > 0) {
@@ -469,7 +479,7 @@ export default {
         attachmentBlock = '\n\n📎 附件：\n' + lines.join('\n')
       }
 
-      // 发送者显示名：payload 自带 → 本地通讯录（~/.dsh/bluebubbles-contacts.json）→ 裸地址
+      // sender display name: payload's own field → local contacts (~/.dsh/bluebubbles-contacts.json) → bare address
       const handleObj = (m.handle && typeof m.handle === 'object') ? m.handle : {}
       const senderName: string | null =
         (typeof handleObj.displayName === 'string' && handleObj.displayName !== '' ? handleObj.displayName : null)
@@ -478,25 +488,29 @@ export default {
 
       const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
       const line = '📱 iMessage' + (chatName ? ' · ' + chatName : '') + fromPart + '\n' + body
-      // next-step：空闲时开新回合；忙碌时并入当前回合下一步骤边界（天然合并突发）
+      // next-step: opens a new turn when idle, merges into the current turn's next step boundary when busy (naturally coalesces bursts)
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
-        // 登记 iMessage 触发的回合：typing 指示（缺省开）与回复自动投递（relay: true 时）
+        // register the iMessage-triggered turn: typing indicator (default on) and reply auto-delivery (when relay: true)
         if (chatGuid) {
           await setTrigger(sessionId, chatGuid, binding.relay === true, binding.typing !== false)
           if (binding.typing !== false) void sendTyping(chatGuid)
         }
         await dbg('delivered session=' + sessionId)
-        console.log('bb: 已投递消息到会话 ' + sessionId + '（' + (chatName || sender || chatGuid) + '）')
+        console.log('bb: message delivered to session ' + sessionId + ' (' + (chatName || sender || chatGuid) + ')')
       }
     }
 
-    // ================= iMessage 触发回合的人体工学（typing 指示 + 回复自动投递） =================
-    // 语义：注入 iMessage 时登记触发；该会话随后的回合视为"在回复这条 iMessage"——
-    // typing 让对方看到「正在输入」；relay 开启时回合内每条含 text 部件的 assistant 消息都
-    // 即时发回（经 sendText，自带 noteSent 防环；只取 type==='text' 部件，thinking/reasoning
-    // 与工具结果一律不投递）；turn/end 清除触发，防串台。
-    // 触发表持久化到 relay-state 文件：热重载会在回合中途重建插件实例，纯内存表会丢触发，
-    // 导致「入站消息收到了、回复却没 relay」的静默失败。setAt + TTL 防止陈年触发复活串台。
+    // ================= iMessage-triggered turn ergonomics (typing indicator + reply auto-delivery) =================
+    // Semantics: injecting an iMessage registers a trigger; the session's following
+    // turn counts as "replying to that iMessage" — typing shows the peer "typing…";
+    // with relay on, every assistant message containing text parts is sent back
+    // immediately (via sendText, which self-records for anti-loop; only type==='text'
+    // parts ship — thinking/reasoning and tool results are never delivered);
+    // turn/end clears the trigger so later unrelated turns never cross-deliver.
+    // The trigger table persists to the relay-state file because a hot reload
+    // rebuilds the plugin instance mid-turn; a purely in-memory table would lose
+    // triggers and silently produce "inbound arrived, reply never relayed".
+    // setAt + TTL prevent an ancient trigger from resurrecting into a new turn.
     type RelayTrigger = { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number; setAt: number }
     const RELAY_TRIGGER_TTL_MS = 10 * 60 * 1000
     const inboundTriggers = new Map<string, RelayTrigger>()
@@ -511,7 +525,7 @@ export default {
         const target = await fs.resolve(state.relayStatePath)
         await fs.writeText(target, JSON.stringify(obj, null, 2))
       } catch (err) {
-        console.log('bb: relay 状态写盘失败（降级为内存态）：' + (err instanceof Error ? err.message : err))
+        console.log('bb: relay state write failed (degrading to in-memory): ' + (err instanceof Error ? err.message : err))
       }
     }
 
@@ -524,7 +538,7 @@ export default {
         if (!value || typeof value !== 'object') continue
         const t = value as Partial<RelayTrigger>
         if (typeof t.chatGuid !== 'string') continue
-        if (typeof t.setAt !== 'number' || now - t.setAt > RELAY_TRIGGER_TTL_MS) continue // 过期触发直接丢弃
+        if (typeof t.setAt !== 'number' || now - t.setAt > RELAY_TRIGGER_TTL_MS) continue // expired triggers are dropped outright
         inboundTriggers.set(sessionId, {
           chatGuid: t.chatGuid,
           relay: t.relay !== false,
@@ -557,7 +571,7 @@ export default {
       try {
         await curl('POST', 'chat/' + encodeURIComponent(chatGuid) + '/typing', {})
       } catch {
-        // typing 指示是纯装饰，失败忽略
+        // typing indicator is pure decoration; failures are ignored
       }
     }
 
@@ -580,36 +594,37 @@ export default {
         if (event.type === 'turn/start' || event.type === 'step/start') {
           if (!trigger.typing) return
           const now = Date.now()
-          if (now - trigger.lastTypingAt < 8000) return // 指示会过期，按 8s 节流续命
+          if (now - trigger.lastTypingAt < 8000) return // the indicator expires server-side; re-arm throttled to 8s
           trigger.lastTypingAt = now
           void sendTyping(trigger.chatGuid)
           return
         }
         if (event.type === 'assistant/message' && trigger.relay) {
           const text = assistantTextOf(event)
-          if (text === '') return // 纯工具调用步，等后续文本
-          // 显式沉默：精确回复 NO_REPLY（trim 后）= 本轮剩余内容也不再投递，触发立即清除
+          if (text === '') return // pure tool-call step; wait for later text
+          // explicit silence: an exact NO_REPLY reply (after trim) stops delivery for the rest of the turn and clears the trigger at once
           if (text === 'NO_REPLY') {
             void clearTrigger(sessionId)
             void dbg('relay suppressed NO_REPLY session=' + sessionId)
             return
           }
-          // 每条含 text 的 assistant 消息即时投递（thinking/工具结果已被 assistantTextOf 过滤）
+          // every assistant message with text ships immediately (thinking/tool results already filtered by assistantTextOf)
           void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
         if (event.type === 'turn/end') void clearTrigger(sessionId)
       } catch {
-        // 事件监听器绝不许影响会话事件流
+        // an event listener must never disturb the session event stream
       }
     })
 
-    // ================= 启动引导（带重试：fiber 激活早期 shell 可能未就绪） =================
+    // ================= startup bootstrap (with retries: the shell may not be ready early in fiber activation) =================
     const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
     const bootstrapOnce = async (): Promise<void> => {
-      // 凭据链：process.env → ~/.dsh/.env → ~/.zshenv。
-      // 注意 .env 只在进程启动时由 DSH 注入，热重载不会重读；
-      // 这里自己再解析一遍，保证热重载后凭据不丢。
+      // Credential chain: process.env → ~/.dsh/.env → ~/.zshenv.
+      // .env is injected by DSH only at process start and hot reload never
+      // re-reads it, so parse the files again here to keep credentials across
+      // reloads.
       let fileText: string | null = null
       if (state.password === '') {
         fileText = await readEnvFiles(ctx.shell, ['"$HOME/.dsh/.env"', '"$HOME/.zshenv"'])
@@ -629,9 +644,9 @@ export default {
       await loadTriggers()
       if (state.password !== '') {
         const wh = await ensureWebhook()
-        console.log('bb: 凭据就绪（' + state.baseUrl + '），webhook 注册：' + JSON.stringify(wh))
+        console.log('bb: credentials ready (' + state.baseUrl + '), webhook registration: ' + JSON.stringify(wh))
       } else {
-        console.log('bb: 未找到 BLUEBUBBLES_PASSWORD（env / ~/.dsh/.env / ~/.zshenv），可用 bb-channel configure 写入 ~/.dsh/.env')
+        console.log('bb: BLUEBUBBLES_PASSWORD not found (env / ~/.dsh/.env / ~/.zshenv); run bb-channel configure to write ~/.dsh/.env')
       }
     }
     const bootstrap = async (): Promise<void> => {
@@ -642,17 +657,17 @@ export default {
           return
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          console.log('bb: 启动引导第 ' + attempt + '/' + maxAttempts + ' 次失败：' + msg)
+          console.log('bb: bootstrap attempt ' + attempt + '/' + maxAttempts + ' failed: ' + msg)
           if (attempt < maxAttempts) await sleep(3000)
         }
       }
-      console.log('bb: 启动引导最终失败（已重试 ' + 10 + ' 次），凭据/ webhook 需人工检查')
+      console.log('bb: bootstrap ultimately failed (after ' + maxAttempts + ' retries); credentials/webhook need manual attention')
     }
     void bootstrap().catch((err: unknown) => {
-      console.log('bb: 启动引导异常：' + (err instanceof Error ? err.message : err))
+      console.log('bb: bootstrap error: ' + (err instanceof Error ? err.message : err))
     })
 
-    // ================= 工具定义与注册 =================
+    // ================= tool definitions and registration =================
     const OUTPUT = {
       schema: { type: 'object', additionalProperties: true },
       render(_args: unknown, value: unknown) {
@@ -681,18 +696,19 @@ export default {
       } as unknown as ToolDefinition
     }
 
-    // 模型工具只保留「发」——其余操作（列会话/读消息/绑定/配置/webhook）
-    // 全部走 bb-channel CLI（bash 调用），见 README 与工作区 TOOLS.md。
+    // Only "send" survives as model tools — everything else (list chats / read
+    // messages / bind / configure / webhook) goes through the bb-channel CLI
+    // (invoked via bash). See README and the workspace TOOLS.md.
     const tools: ToolDefinition[] = [
       define({
         name: 'bluebubbles_send_text',
-        description: '通过 BlueBubbles 发送一条 iMessage 文本消息。chatGuid 可用 bash 里的 bb-channel chats 查询。',
+        description: 'Send one iMessage text via BlueBubbles. Find chatGuid with `bb-channel chats` in bash.',
         parameters: {
           type: 'object',
           properties: {
-            chatGuid: { type: 'string', description: '目标会话 GUID' },
-            text: { type: 'string', description: '要发送的消息文本' },
-            method: { type: 'string', enum: ['apple-script', 'private-api'], description: 'apple-script（默认）或 private-api' },
+            chatGuid: { type: 'string', description: 'Target chat GUID' },
+            text: { type: 'string', description: 'Message text to send' },
+            method: { type: 'string', enum: ['apple-script', 'private-api'], description: 'apple-script (default) or private-api' },
           },
           required: ['chatGuid', 'text'],
         },
@@ -700,14 +716,14 @@ export default {
       }),
       define({
         name: 'bluebubbles_send_attachment',
-        description: '通过 BlueBubbles 发送一条 iMessage 附件消息（图片/文件）。filePath 必须是运行 BlueBubbles 的 Mac 上的绝对路径。',
+        description: 'Send one iMessage attachment (image/file) via BlueBubbles. filePath must be an absolute path on the Mac running BlueBubbles.',
         parameters: {
           type: 'object',
           properties: {
-            chatGuid: { type: 'string', description: '目标会话 GUID' },
-            filePath: { type: 'string', description: 'Mac 上要发送的文件的绝对路径' },
-            name: { type: 'string', description: '对方看到的文件名（默认取路径最后一段）' },
-            method: { type: 'string', enum: ['apple-script', 'private-api'], description: 'private-api（默认，更可靠）或 apple-script' },
+            chatGuid: { type: 'string', description: 'Target chat GUID' },
+            filePath: { type: 'string', description: 'Absolute path of the file on that Mac' },
+            name: { type: 'string', description: 'File name the recipient sees (defaults to the last path segment)' },
+            method: { type: 'string', enum: ['apple-script', 'private-api'], description: 'private-api (default, more reliable) or apple-script' },
           },
           required: ['chatGuid', 'filePath'],
         },
@@ -719,7 +735,7 @@ export default {
       ctx.effect(() => ctx.tools.register(tool), 'tool:' + tool.name)
     }
 
-    // ================= HTTP 路由 =================
+    // ================= HTTP routes =================
     if (webServer) {
       ctx.effect(() => webServer.register({
         kind: 'exact',
@@ -728,7 +744,7 @@ export default {
       }), 'route:webhook')
     }
 
-    // ================= 供其它插件使用的服务 =================
+    // ================= service for other plugins =================
     const provide = (ctx as unknown as { provide(name: string, value: unknown): unknown }).provide
     provide.call(ctx, 'bluebubbles', {
       configure: (args: Record<string, unknown>) => applyConfig(args),
@@ -744,9 +760,10 @@ export default {
         return saveBindings()
       },
       listBindings: () => state.bindings,
-      // 供 dsh-cron 等插件复用入站 relay 机制：给指定会话登记「回复自动投递到 chatGuid」触发。
-      // 语义与 iMessage 入站触发的回合完全一致（assistant 文本逐条即时投递、NO_REPLY 抑制、
-      // turn/end 清除、触发表持久化 + TTL）。
+      // Lets dsh-cron and friends reuse the inbound relay mechanism: register a
+      // "deliver replies to chatGuid" trigger for a session. Semantics identical
+      // to iMessage-inbound turns (per-message text delivery, NO_REPLY
+      // suppression, turn/end clear, persisted trigger table + TTL).
       armRelay: (args: { sessionId: string; chatGuid: string; relay?: boolean; typing?: boolean }) =>
         setTrigger(args.sessionId, args.chatGuid, args.relay !== false, args.typing === true),
     })

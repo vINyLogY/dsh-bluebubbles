@@ -1,6 +1,6 @@
-// src/lib.ts — dsh-bluebubbles 系列插件共享库（仅可擦除 TS 语法）。
-// 被 src/index.ts / src/heartbeat.ts（以及未来的 src/cron.ts）以
-// `import { … } from './lib.ts'` 引用——Node 原生类型剥离要求相对导入带 .ts 扩展名。
+// src/lib.ts — shared helpers for the dsh-bluebubbles plugin family (erasable
+// TS syntax only). Relative imports must carry the .ts extension because Node
+// native type stripping does no path rewriting.
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -8,7 +8,10 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 
-// ================= 服务读取与结构视图 =================
+// ================= service access =================
+// These interfaces are structural views over host services; getService keeps
+// every consumer on the optional ctx.get() path so a missing service degrades
+// instead of blocking plugin activation.
 export function getService<T>(ctx: Context, name: string): T | undefined {
   const raw = (ctx as unknown as { get(name: string): unknown }).get(name)
   return raw as T | undefined
@@ -35,13 +38,13 @@ export interface ShellService {
   run(spec: ShellExecSpec): Promise<ShellRunResult>
 }
 
-/** 目标会话引用（工作区路径或会话 ID，二选一）。 */
+/** A target session reference: either a workspace path or an exact session id. */
 export interface SessionTarget {
   workspacePath?: string
   sessionId?: string
 }
 
-// ================= dotenv 解析 =================
+// ================= dotenv parsing =================
 export function pickEnvValue(text: string, name: string): string | null {
   const re = new RegExp('(?:^|\\n)\\s*(?:export\\s+)?' + name + '=(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\']+))', 'm')
   const m = re.exec(text)
@@ -49,7 +52,7 @@ export function pickEnvValue(text: string, name: string): string | null {
   return (m[1] || m[2] || m[3] || '').trim()
 }
 
-/** 解析时间间隔："30m"/"2h"/"12h"/"90s"/"5000ms"；裸数字按小时。返回毫秒。 */
+/** Parse "30m"/"2h"/"12h"/"90s"/"5000ms" into milliseconds; a bare number means hours. */
 export function parseInterval(raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === '') return null
   const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw)
@@ -60,10 +63,11 @@ export function parseInterval(raw: string | undefined): number | null {
   return unit === 'ms' ? n : unit === 's' ? n * 1000 : unit === 'm' ? n * 60 * 1000 : n * 3600 * 1000
 }
 
-// ================= env 文件读取（.env/.zshenv 回退链） =================
+// ================= env file fallback chain =================
 /**
- * 依序读取文件列表，返回第一个非空文件的文本（DSH 的 .env 只在进程启动时
- * 由官方注入；插件热重载时靠这里自读，保证配置不丢）。
+ * Read each file in order and return the first non-empty text. DSH injects
+ * .env only at process start; on hot reload nothing re-injects it, so plugins
+ * re-read the files themselves to avoid silently losing credentials.
  */
 export async function readEnvFiles(shell: ShellService, files: readonly string[]): Promise<string | null> {
   for (const file of files) {
@@ -72,14 +76,19 @@ export async function readEnvFiles(shell: ShellService, files: readonly string[]
       const run: ShellRunResult = await shell.run(spec)
       if (run.exitCode === 0 && run.stdout && run.stdout.text) return run.stdout.text
     } catch {
-      // 尝试下一个文件
+      // try the next file
     }
   }
   return null
 }
 
-// ================= 会话解析 =================
-/** sessionId 优先；否则解析 workspacePath 的最新会话（sessionIds[0]）。 */
+// ================= session resolution =================
+/**
+ * sessionId wins over workspacePath: bindings written for one conversation
+ * must not drift when a newer session appears in the same workspace.
+ * workspacePath resolves to sessionIds[0], the workspace registry's most
+ * recent session.
+ */
 export async function resolveSession(
   workspaces: WorkspaceRegistryService | undefined,
   target: SessionTarget,
@@ -90,15 +99,16 @@ export async function resolveSession(
     const ws = await workspaces.resolveByPath(target.workspacePath)
     if (ws && Array.isArray(ws.sessionIds) && ws.sessionIds.length > 0) return ws.sessionIds[0] as string
   } catch (err) {
-    console.log('lib: 解析工作区失败：' + (err instanceof Error ? err.message : err))
+    console.log('lib: workspace resolution failed: ' + (err instanceof Error ? err.message : err))
   }
   return null
 }
 
-// ================= 消息注入 =================
+// ================= message injection =================
 /**
- * 把一条文本以用户消息身份注入目标会话并唤醒。
- * @returns 是否成功投递（目标无活跃 agent 时返回 false，不抛错）。
+ * Inject a text as a user message into the target session and wake it.
+ * @returns whether delivery happened; a missing live agent yields false
+ *          instead of throwing so callers decide between drop and retry.
  */
 export function sendUserMessage(
   agents: AgentsService | undefined,
