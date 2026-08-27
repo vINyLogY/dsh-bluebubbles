@@ -15,7 +15,7 @@ jobs:
           node-version: 24 # native TS type stripping (>= 23.6) is the runtime contract
       # dsh plugin add forwards to pnpm verbatim; it must exist on PATH.
       - run: corepack enable && corepack prepare pnpm@latest --activate
-      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --legacy-peer-deps
       - run: npm run typecheck
       # Integration: install THIS commit's tree into a throwaway profile through
       # the real consumer path and assert the bundle rows compose.
