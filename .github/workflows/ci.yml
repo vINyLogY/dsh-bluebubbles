@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # native TS type stripping (>= 23.6) is the runtime contract
+      # dsh plugin add forwards to pnpm verbatim; it must exist on PATH.
+      - run: corepack enable && corepack prepare pnpm@latest --activate
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      # Integration: install THIS commit's tree into a throwaway profile through
+      # the real consumer path and assert the bundle rows compose.
+      - run: npm run test:integration

@@ -22,24 +22,27 @@ const ENV_PATH = join(DSH_HOME, '.env')
 const DEFAULT_WEBHOOK_URL = 'http://127.0.0.1:3080/bluebubbles/webhook'
 
 // ---------- config resolution ----------
+/** @param {string} path @returns {Record<string, string>} */
 function parseEnvFile(path) {
   try {
     const text = readFileSync(path, 'utf8')
+    /** @type {Record<string, string>} */
     const out = {}
     for (const line of text.split('\n')) {
       const m = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
       if (!m) continue
-      let v = m[2]
+      let v = m[2] ?? ''
       if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
-      out[m[1]] = v
+      out[m[1] ?? ''] = v
     }
     return out
   } catch { return {} }
 }
 
+/** @returns {{ baseUrl: string, password: string }} */
 function resolveConfig() {
   const fromEnvFile = { ...parseEnvFile(join(homedir(), '.zshenv')), ...parseEnvFile(ENV_PATH) }
-  const pick = (k) => process.env[k] || fromEnvFile[k] || ''
+  const pick = (/** @type {string} */ k) => process.env[k] || fromEnvFile[k] || ''
   return {
     baseUrl: (pick('BLUEBUBBLES_BASE_URL') || 'http://localhost:1234').replace(/\/+$/, ''),
     password: pick('BLUEBUBBLES_PASSWORD'),
@@ -48,20 +51,24 @@ function resolveConfig() {
 
 const cfg = resolveConfig()
 
+/** @param {string} path @returns {string} */
 function url(path) {
   const sep = path.includes('?') ? '&' : '?'
   return `${cfg.baseUrl}/api/v1/${path}${sep}password=${encodeURIComponent(cfg.password)}`
 }
 
+/** @param {string} msg @returns {never} */
 function die(msg) {
   console.error('bb-channel: ' + msg)
   process.exit(1)
 }
 
+/** @returns {void} */
 function requirePassword() {
   if (!cfg.password) die('BLUEBUBBLES_PASSWORD not found (env / ~/.dsh/.env / ~/.zshenv); run bb-channel configure --password <pw> first')
 }
 
+/** @param {string} method @param {string} path @param {unknown} [body] @returns {Promise<any>} */
 async function api(method, path, body) {
   requirePassword()
   const res = await fetch(url(path), {
@@ -70,7 +77,7 @@ async function api(method, path, body) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(30000),
   })
-  const parsed = await res.json().catch(() => null)
+  const parsed = /** @type {any} */ (await res.json().catch(() => null))
   if (!parsed) die('cannot parse BlueBubbles response (HTTP ' + res.status + ')')
   if (typeof parsed.status === 'number' && parsed.status >= 400) {
     const e = parsed.error
@@ -80,22 +87,27 @@ async function api(method, path, body) {
 }
 
 // ---------- state files ----------
+/** @param {string} path @param {any} fallback @returns {any} */
 function readJson(path, fallback) {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return fallback }
 }
+/** @param {string} path @param {unknown} value @returns {void} */
 function writeJson(path, value) {
   mkdirSync(join(path, '..'), { recursive: true })
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 }
+/** @returns {Record<string, string>} */
 const contacts = () => readJson(CONTACTS_PATH, {})
 
 // ---------- display helpers ----------
+/** @param {any} m @param {Record<string, string>} cs @returns {string} */
 function senderOf(m, cs) {
   const addr = (m.handle && m.handle.address) || (m.isFromMe ? 'me' : '?')
   const name = (!m.isFromMe && cs[addr]) || null
   return name ? `${name}（${addr}）` : addr
 }
 
+/** @param {any} m @param {Record<string, string>} cs @returns {Record<string, unknown>} */
 function compactMessage(m, cs) {
   return {
     guid: m.guid,
@@ -104,13 +116,14 @@ function compactMessage(m, cs) {
     text: m.text ?? null,
     date: m.dateCreated ? new Date(m.dateCreated).toISOString() : null,
     attachments: Array.isArray(m.attachments) && m.attachments.length
-      ? m.attachments.map((a) => ({ guid: a.guid, name: a.transferName, mime: a.mimeType }))
+      ? m.attachments.map((/** @type {any} */ a) => ({ guid: a.guid, name: a.transferName, mime: a.mimeType }))
       : undefined,
   }
 }
 
 // noise filter: the any;-;any placeholder chat, empty chats with neither
 // participants nor a display name, and pairing-code style system messages
+/** @param {any} c @returns {boolean} */
 function isNoiseChat(c) {
   if (!c || !c.guid) return true
   if (c.guid === 'any;-;any') return true
@@ -142,11 +155,14 @@ Usage: bb-channel <command> [args]
 
 Credential chain: environment → ~/.dsh/.env → ~/.zshenv. Output is JSON, jq-friendly.`
 
+/** @param {string[]} args @param {string} flag @returns {string | null} */
 function argValue(args, flag) {
   const i = args.indexOf(flag)
   return i !== -1 && i + 1 < args.length ? args[i + 1] : null
 }
+/** @param {string[]} args @param {string} flag @returns {boolean} */
 function hasFlag(args, flag) { return args.includes(flag) }
+/** @param {string[]} args @returns {string[]} */
 function positional(args) {
   const flagsWithValue = ['--limit', '--method', '--name', '--dir', '--workspace', '--session', '--url', '--base-url', '--password']
   const out = []
@@ -160,10 +176,11 @@ function positional(args) {
   return out
 }
 
+/** @returns {Promise<void>} */
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2)
   const pos = positional(rest)
-  const out = (v) => console.log(JSON.stringify(v, null, 2))
+  const out = (/** @type {unknown} */ v) => console.log(JSON.stringify(v, null, 2))
 
   switch (cmd) {
     case undefined:
@@ -191,7 +208,7 @@ async function main() {
         chats: filtered.map((c) => ({
           guid: c.guid,
           displayName: c.displayName || null,
-          participants: (c.participants || []).map((p) => p.address),
+          participants: (c.participants || []).map((/** @type {any} */ p) => p.address),
           lastMessage: c.lastMessage ? compactMessage(c.lastMessage, contacts()) : null,
         })),
       })
@@ -203,7 +220,7 @@ async function main() {
       const limit = Math.min(Math.max(parseInt(argValue(rest, '--limit') || '25', 10) || 25, 1), 100)
       const data = await api('GET', 'chat/' + encodeURIComponent(chatGuid) + '/message?limit=' + limit + '&sort=DESC')
       const cs = contacts()
-      out({ count: (data || []).length, messages: (data || []).map((m) => compactMessage(m, cs)) })
+      out({ count: (data || []).length, messages: (data || []).map((/** @type {any} */ m) => compactMessage(m, cs)) })
       return
     }
 
@@ -233,7 +250,7 @@ async function main() {
       form.append('attachment', new Blob([bytes]), name)
       requirePassword()
       const res = await fetch(url('message/attachment'), { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
-      const parsed = await res.json().catch(() => null)
+      const parsed = /** @type {any} */ (await res.json().catch(() => null))
       if (!parsed || (typeof parsed.status === 'number' && parsed.status >= 400)) {
         die('send failed: ' + JSON.stringify(parsed && parsed.error ? parsed.error : parsed))
       }
@@ -260,6 +277,7 @@ async function main() {
       const workspace = argValue(rest, '--workspace')
       const session = argValue(rest, '--session')
       if (!workspace && !session) die('bind requires --workspace PATH or --session ID')
+      /** @type {{ sessionId?: string, workspacePath?: string | null, relay?: boolean, typing?: boolean }} */
       const binding = session ? { sessionId: session } : { workspacePath: workspace }
       // --relay: auto-deliver text replies of iMessage-triggered turns back to the
       // chat; --no-typing: disable the "typing…" indicator (on by default)
@@ -315,7 +333,7 @@ async function main() {
       const password = argValue(rest, '--password')
       if (!baseUrl && !password) die('configure requires --base-url and/or --password')
       let text = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
-      const upsert = (t, key, value) => {
+      const upsert = (/** @type {string} */ t, /** @type {string} */ key, /** @type {string} */ value) => {
         const re = new RegExp('^\\s*#?\\s*' + key + '=.*$', 'm')
         return re.test(t) ? t.replace(re, key + '=' + value) : t.replace(/\n?$/, '\n') + key + '=' + value + '\n'
       }

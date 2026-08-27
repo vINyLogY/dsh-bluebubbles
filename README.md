@@ -109,6 +109,24 @@ With `BLUEBUBBLES_DEBUG=1` (env or `.env`), inbound events and drop reasons go t
 - Injected content is plain text messages and triggers no tools; outbound sends always happen through explicit model tool calls.
 - Neither the repository nor the patch file contains credentials.
 
+## Installation
+
+As a profile bundle (consumers):
+
+```bash
+dsh plugin --profile web add github:vINyLogY/dsh-bluebubbles
+```
+
+`dsh plugin add` forwards to pnpm and, because this package declares
+`dsh.bundle.patch`, automatically joins the profile's bundle stack — the
+shipped `cordis.patch.yml` inserts rows for all three plugins
+(`bluebubbles-bridge`, `dsh-heartbeat`, `dsh-cron`, resolved through the
+package exports map). A DSH restart loads them. The `bb-channel` CLI lands on
+the profile's `node_modules/.bin` via the package `bin` entry.
+
+For local development, insert absolute-path rows with a `?v=N` cache-buster
+into the profile's own `cordis.patch.yml` instead (see below).
+
 ## Tech stack
 
 - **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (0.1.0-rc.7 / cordis 4.0.1).

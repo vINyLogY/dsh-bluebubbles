@@ -3,14 +3,23 @@
     "target": "es2023",
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "lib": ["es2023"],
-    "types": ["node"],
+    "lib": [
+      "es2023"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
-    "noUncheckedIndexedAccess": false
+    "noUncheckedIndexedAccess": false,
+    "allowJs": true,
+    "checkJs": true
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "bin"
+  ]
 }

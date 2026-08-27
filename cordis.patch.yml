@@ -1,0 +1,14 @@
+# dsh-bluebubbles bundle patch: installed via `dsh plugin --profile <name> add`.
+# New plugins join the composed tree through an insert list — a bare id row in
+# a patch layer only overrides an existing entry and would be skipped with
+# "entry not found". Rows resolve through this package's exports map; Node
+# >= 23.6 strips the types natively, so no build step exists on the consumer
+# side either.
+
+- insert:
+    - id: bluebubbles-bridge
+      name: dsh-bluebubbles
+    - id: dsh-heartbeat
+      name: dsh-bluebubbles/heartbeat
+    - id: dsh-cron
+      name: dsh-bluebubbles/cron

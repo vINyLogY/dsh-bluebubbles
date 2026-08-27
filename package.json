@@ -7,10 +7,13 @@
   "license": "MIT",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./heartbeat": "./src/heartbeat.ts",
+    "./cron": "./src/cron.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:integration": "node test/integration.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
@@ -27,5 +30,20 @@
   },
   "engines": {
     "node": ">=23.6"
+  },
+  "bin": {
+    "bb-channel": "bin/bb-channel.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }
