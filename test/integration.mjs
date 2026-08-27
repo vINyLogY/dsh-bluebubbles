@@ -25,21 +25,19 @@ function fail(msg) {
   process.exit(1)
 }
 
-// DSH_BIN (path to a dsh bin.js) selects an already-installed CLI; the default
-// npx path proves the latest published CLI works but downloads the world.
+// CLI resolution order: DSH_BIN (explicit bin.js path) → the repo's own
+// devDependency (npm ci already fetched it — the CI path) → npx @latest.
+// The npx fallback sets npm_config_legacy_peer_deps: npm's default peer
+// resolution spins for many minutes on the dsh tree (observed burning ~90%
+// CPU on both macOS and the GitHub runner until it ETIMEDOUT).
+const localBin = join(repoRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+
 function dsh(args) {
-  const bin = process.env.DSH_BIN
+  const env = { ...process.env, DSH_HOME: dshHome, npm_config_legacy_peer_deps: 'true' }
+  const bin = process.env.DSH_BIN || (existsSync(localBin) ? localBin : null)
   const run = bin
-    ? spawnSync('node', [bin, ...args], {
-        env: { ...process.env, DSH_HOME: dshHome },
-        encoding: 'utf8',
-        timeout: 120000,
-      })
-    : spawnSync('npx', ['-y', '@deepseek-ai/dsh@latest', ...args], {
-        env: { ...process.env, DSH_HOME: dshHome },
-        encoding: 'utf8',
-        timeout: 600000,
-      })
+    ? spawnSync('node', [bin, ...args], { env, encoding: 'utf8', timeout: 300000 })
+    : spawnSync('npx', ['-y', '@deepseek-ai/dsh@latest', ...args], { env, encoding: 'utf8', timeout: 600000 })
   if (run.error) fail(`spawn failed: ${run.error.message}`)
   if (run.status !== 0) fail(`dsh ${args.join(' ')} exited ${run.status}\n${run.stderr}\n${run.stdout}`.slice(0, 4000))
   return run.stdout
