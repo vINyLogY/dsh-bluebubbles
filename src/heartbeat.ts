@@ -83,10 +83,20 @@ export default {
       // Align the first tick to the wall-clock interval boundary so a restart
       // does not shift the daily rhythm by whenever the process happened to boot.
       const firstDelay = heartbeatMs - (Date.now() % heartbeatMs)
-      ctx.effect(() => timer.timeout(() => {
-        void tick()
-        timer.interval(() => { void tick() }, heartbeatMs)
-      }, firstDelay), 'heartbeat')
+      // Both the first-shot timeout and the interval it creates must stay
+      // fiber-owned: an interval created inside the callback without capturing
+      // its disposer survives stop/HMR and keeps beating.
+      ctx.effect(() => {
+        let stopInterval: (() => void) | null = null
+        const stopFirst = timer.timeout(() => {
+          void tick()
+          stopInterval = timer.interval(() => { void tick() }, heartbeatMs)
+        }, firstDelay)
+        return () => {
+          stopFirst()
+          if (stopInterval) stopInterval()
+        }
+      }, 'heartbeat')
       console.log('hb: enabled, interval ' + Math.round(heartbeatMs / 3600000 * 10) / 10 + 'h, first tick in ' + Math.round(firstDelay / 60000) + ' min')
     }
     void bootstrap()

@@ -177,6 +177,15 @@ export default {
       }
     }
 
+    // The pending one-shot's disposer must stay fiber-owned: an untracked
+    // timeout chain survives stop/HMR and every reload would stack another
+    // duplicate chain firing the same jobs.
+    let cancelPending: (() => void) | null = null
+    ctx.effect(() => () => {
+      if (cancelPending) cancelPending()
+      cancelPending = null
+    }, 'cron-schedule')
+
     function scheduleNext(): void {
       let best: { label: string; at: Date } | null = null
       const now = new Date()
@@ -189,7 +198,7 @@ export default {
         return
       }
       const delay = Math.max(1000, best.at.getTime() - Date.now() + 100)
-      timer.timeout(() => {
+      cancelPending = timer.timeout(() => {
         void fire(best.label)
         scheduleNext()
       }, delay)
