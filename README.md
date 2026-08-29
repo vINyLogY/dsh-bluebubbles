@@ -1,5 +1,8 @@
 # dsh-bluebubbles
 
+[![ci](https://github.com/vINyLogY/dsh-bluebubbles/actions/workflows/ci.yml/badge.svg)](https://github.com/vINyLogY/dsh-bluebubbles/actions/workflows/ci.yml)
+[![dsh version verified by CI integration](https://img.shields.io/github/package-json/dependency-version/vINyLogY/dsh-bluebubbles/dev/@deepseek-ai/dsh?label=dsh%20%28ci-verified%29)](https://github.com/vINyLogY/dsh-bluebubbles/actions/workflows/ci.yml)
+
 Bridges a local [BlueBubbles](https://bluebubbles.app) server (the macOS iMessage bridge) into DeepSeek Harness.
 
 Design principle (Unix philosophy): **the host plugin keeps only passive capabilities** (webhook receive + binding resolution + message injection) and **two high-frequency model tools** (send text / send attachment); everything else converges into the `bb-channel` CLI — agents call it via bash, humans and automation scripts use it directly.
