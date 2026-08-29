@@ -132,7 +132,7 @@ into the profile's own `cordis.patch.yml` instead (see below).
 
 ## Tech stack
 
-- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (0.1.0-rc.7 / cordis 4.0.1).
+- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version).
 - **Zero build**: Node ≥ 23.6 native type stripping; composition rows point straight at `src/index.ts`.
 - The CLI is plain Node ESM (`bin/bb-channel.mjs`), zero dependencies, global `fetch`/`FormData` — deliberately `.mjs` so it runs on any modern Node and stays ESM wherever it is symlinked.
 - Bootstrap: `npm install --cache ./.npm-cache && npm run typecheck`.
