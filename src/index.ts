@@ -6,7 +6,8 @@
 // repository never contains credentials.
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, PreToolDecision } from '@deepseek-ai/dsh-tools'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -331,7 +332,7 @@ export default {
       res.statusCode = 200
       // Version marker must match the ?v=N in the host cordis.patch.yml row —
       // README's update procedure verifies the live build through this string.
-      res.end('ok-v31')
+      res.end('ok-v32')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -617,6 +618,83 @@ export default {
         // an event listener must never disturb the session event stream
       }
     })
+
+    // ================= headless guard (auto-answer approvals / block ask_user_question for bound sessions) =================
+    // Both interactive seams (the approval card and the ask_user_question card)
+    // are answered only by a connected web client; for a session driven purely
+    // over iMessage either one parks the turn forever. These prepend listeners
+    // run ahead of the web answerers and short-circuit exactly the sessions
+    // named by the bindings table — every other session falls through next()
+    // to the ordinary web flow. The root walk also covers subagent children of
+    // a guarded session: the waterfall targets the child's scope, but a child
+    // of an iMessage-driven root has no human answerer either.
+    const guardEnabled = (process.env.BLUEBUBBLES_GUARD || '1') !== '0'
+    // Approvals exist for sandbox escalations; auto-allowing widens what a
+    // chat-driven session may do, so reject is the default and 'allow' is an
+    // explicit opt-in for trusted setups.
+    const guardApprovalOutcome: 'allowed-once' | 'rejected' =
+      (process.env.BLUEBUBBLES_GUARD_APPROVAL || 'reject') === 'allow' ? 'allowed-once' : 'rejected'
+
+    function rootAgentOf(agent: any): any {
+      if (!agents) return agent
+      try {
+        let current = agent
+        const seen = new Set<string>()
+        for (let depth = 0; depth < 8; depth++) {
+          if (agents.roots().includes(current)) return current
+          const owner = agents.list().find((candidate: any) => candidate !== current && agents.isOwnedBy(current.id, candidate))
+          if (!owner || seen.has(owner.id)) return current
+          seen.add(owner.id)
+          current = owner
+        }
+        return current
+      } catch {
+        return agent
+      }
+    }
+
+    async function isGuardedAgent(agent: any): Promise<boolean> {
+      const root = rootAgentOf(agent)
+      const sessionId: string | undefined = root && root.session && root.session.id
+      if (!sessionId) return false
+      // hot re-read: the CLI may have edited the bindings file since the last inbound message
+      await reloadStateFiles(false)
+      for (const binding of Object.values(state.bindings)) {
+        if (binding.sessionId === sessionId) return true
+        if (binding.workspacePath && (await resolveSession(workspaces, binding)) === sessionId) return true
+      }
+      return false
+    }
+
+    if (guardEnabled) {
+      ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
+        try {
+          if (exec.name !== 'ask_user_question' || !exec.agent) return next()
+          if (!(await isGuardedAgent(exec.agent))) return next()
+          return {
+            kind: 'deny',
+            reason:
+              'This session is driven over iMessage and has no web UI attached, so interactive question cards can never be answered. ' +
+              "Ask the question as plain text in your reply instead — the reply is automatically relayed to the user's iMessage — then end your turn and wait for the answer.",
+          }
+        } catch {
+          return next() // a guard failure must never block ordinary tool calls
+        }
+      }, { prepend: true })
+
+      ctx.on('approval/request', async (req, next): Promise<ApprovalOutcome> => {
+        try {
+          if (!req.agent) return next()
+          if (!(await isGuardedAgent(req.agent))) return next()
+          await dbg('guard approval auto-' + guardApprovalOutcome + ' tool=' + req.toolName + ' session=' + req.agent.session.id)
+          return guardApprovalOutcome
+        } catch {
+          return next() // a guard failure must never swallow the web answerer
+        }
+      }, { prepend: true })
+
+      console.log('bb: headless guard enabled (ask_user_question denied, approvals auto-' + guardApprovalOutcome + ' for iMessage-bound sessions)')
+    }
 
     // ================= startup bootstrap (with retries: the shell may not be ready early in fiber activation) =================
     const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))

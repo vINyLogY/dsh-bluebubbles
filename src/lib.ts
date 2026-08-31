@@ -19,6 +19,9 @@ export function getService<T>(ctx: Context, name: string): T | undefined {
 
 export interface AgentsService {
   get(id: string): Agent | undefined
+  list(): Agent[]
+  roots(): Agent[]
+  isOwnedBy(id: string, owner: Agent): boolean
 }
 export interface WorkspaceRegistryService {
   resolveByPath(path: string): Promise<Workspace | undefined>

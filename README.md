@@ -73,6 +73,15 @@ With `relay: true` on a binding, the bridge registers a reply trigger for the wo
 
 When `dsh-cron` fires a job whose target session has a `relay: true` binding, it arms the same mechanism through the `bluebubbles` service's `armRelay`. **Cron task prompts must not tell the model to call send tools itself** — that would double-send.
 
+## Headless guard (no web UI attached)
+
+A session driven purely over iMessage has nobody to click the web UI's interactive cards, and both cards would otherwise park the turn forever. For any session named by the bindings table (including subagent children of one), the bridge registers prepend listeners that run ahead of the web answerers:
+
+- **`ask_user_question` is denied** with a corrective message telling the model to ask in plain text instead — the reply is relayed to iMessage automatically, then the turn ends and the user's next iMessage answers it;
+- **approval requests are auto-decided** — default `reject` (fail closed: sandbox escalations are denied and the model is told to continue without them). Set `BLUEBUBBLES_GUARD_APPROVAL=allow` to auto-approve instead, only for trusted setups.
+
+Sessions not in the bindings table fall through to the ordinary web flow unchanged. Disable the guard entirely with `BLUEBUBBLES_GUARD=0`.
+
 ## Configuration
 
 ### Credentials
