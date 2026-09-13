@@ -15,7 +15,7 @@
 
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 
-import { getService, resolveSession, sendUserMessage } from './lib.ts'
+import { ensureLiveAgent, getService, resolveSession, sendUserMessage } from './lib.ts'
 import type { AgentsService, FsService, TimerService, WorkspaceRegistryService, SessionTarget } from './lib.ts'
 
 interface CronJob {
@@ -166,6 +166,9 @@ export default {
           }
         }
         if (!text) text = 'Run the scheduled task "' + label + '".'
+        // resume the persisted session on demand: a DSH restart leaves no live
+        // agent until the web UI reopens it, which must not skip scheduled jobs
+        await ensureLiveAgent(ctx, agents, sessionId)
         if (sendUserMessage(agents, sessionId, text, 'dsh-cron', 'next-turn')) {
           console.log('cron: fired ' + label + ' → ' + sessionId)
           await armRelayIfBound(ctx, sessionId, label)

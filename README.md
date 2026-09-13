@@ -103,7 +103,7 @@ Sessions not in the bindings table fall through to the ordinary web flow unchang
 | `heartbeat-targets.json` | heartbeat targets | hand-edited |
 | `cron-jobs.json` | cron jobs | hand-edited |
 
-**Session resolution chain**: `sessionId` direct → otherwise `workspacePath` → that workspace's `sessionIds[0]` (most recent session) → verify a live agent. With no live agent the message is dropped and logged (no fallback, no queue).
+**Session resolution chain**: `sessionId` direct → otherwise `workspacePath` → that workspace's `sessionIds[0]` (most recent session) → live agent. With no live agent, the bridge **resumes the persisted session on demand** (folding its stored preset, same as the web UI's attach path) — bound chats survive DSH restarts without anyone reopening them. A message is dropped and logged only when the resume itself fails (unknown session, subagent-owned session, missing preset).
 
 ## Updating the code
 

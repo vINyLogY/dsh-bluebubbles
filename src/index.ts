@@ -12,7 +12,7 @@ import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import { getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
+import { ensureLiveAgent, getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
 import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
 
 interface WebServerService {
@@ -332,7 +332,7 @@ export default {
       res.statusCode = 200
       // Version marker must match the ?v=N in the host cordis.patch.yml row —
       // README's update procedure verifies the live build through this string.
-      res.end('ok-v32')
+      res.end('ok-v33')
       let event: { type?: string; data?: any } | null = null
       try {
         event = JSON.parse(raw)
@@ -456,10 +456,12 @@ export default {
         console.log('bb: binding target has no session: ' + JSON.stringify(binding))
         return
       }
-      const agent = agents ? agents.get(sessionId) : undefined
+      // resume the persisted session on demand: after a DSH restart no agent
+      // is live until the web UI reopens it, which must not mute a bound chat
+      const agent = await ensureLiveAgent(ctx, agents, sessionId)
       if (!agent) {
         await dbg('drop:no-agent session=' + sessionId + ' agentsSvc=' + (agents ? 'yes' : 'NO'))
-        console.log('bb: target session has no live agent: ' + sessionId)
+        console.log('bb: target session has no live agent (and resume failed): ' + sessionId)
         return
       }
 

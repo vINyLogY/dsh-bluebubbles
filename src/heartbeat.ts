@@ -8,7 +8,7 @@
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 
-import { getService, parseInterval, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
+import { ensureLiveAgent, getService, parseInterval, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
 import type { AgentsService, FsService, TimerService, WorkspaceRegistryService, SessionTarget } from './lib.ts'
 
 interface HeartbeatTarget extends SessionTarget {
@@ -58,6 +58,8 @@ export default {
           const prompt = target.heartbeatMd
             ? 'Read ' + target.heartbeatMd + ' (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
             : DEFAULT_PROMPT
+          // resume the persisted session on demand (same restart rationale as cron)
+          await ensureLiveAgent(ctx, agents, sessionId)
           if (sendUserMessage(agents, sessionId, prompt, 'dsh-heartbeat', 'next-turn')) {
             console.log('hb: heartbeat delivered → ' + label)
           }

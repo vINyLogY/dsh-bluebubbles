@@ -22,6 +22,18 @@ export interface AgentsService {
   list(): Agent[]
   roots(): Agent[]
   isOwnedBy(id: string, owner: Agent): boolean
+  resume(options: { resumeSessionId: string; setup?: (agentCtx: unknown) => Promise<void> }): Promise<{ agent: Agent }>
+}
+export interface SessionPersistenceService {
+  list(): Promise<Array<{ id: string }>>
+  inspect(id: string): Promise<{
+    meta: { id: string; origin?: string; agentPreset?: string }
+    events: Array<{ type?: string; data?: { agentPreset?: string } }>
+  }>
+}
+export interface AgentPresetsService {
+  resolve(id?: string): Promise<{ id: string }>
+  mount(agentCtx: unknown, id: string): Promise<unknown>
 }
 export interface WorkspaceRegistryService {
   resolveByPath(path: string): Promise<Workspace | undefined>
@@ -105,6 +117,62 @@ export async function resolveSession(
     console.log('lib: workspace resolution failed: ' + (err instanceof Error ? err.message : err))
   }
   return null
+}
+
+// ================= agent resume =================
+// Inbound iMessage/cron delivery used to require the target session's agent
+// to be live already, so a DSH restart silently broke every bound chat until
+// someone reopened it in the web UI. ensureLiveAgent reproduces the web
+// attach path: fold the stored preset from the session log (last
+// agent-preset/selected event wins over the creation header), then resume the
+// persisted session under this plugin's ownership. The returned handle is
+// deliberately dropped — ownership follows the plugin fiber, so the agent
+// stays live until plugin teardown, and a hot reload simply re-resumes on the
+// next inbound message.
+const resumeInflight = new Map<string, Promise<Agent | undefined>>()
+
+export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined, sessionId: string): Promise<Agent | undefined> {
+  const live = agents ? agents.get(sessionId) : undefined
+  if (live) return Promise.resolve(live)
+  const pending = resumeInflight.get(sessionId)
+  if (pending) return pending // an inbound burst must not race two resumes of one session
+  const attempt = (async (): Promise<Agent | undefined> => {
+    try {
+      if (!agents || typeof agents.resume !== 'function') return undefined
+      const persistence = getService<SessionPersistenceService>(ctx, 'sessionPersistence')
+      const presets = getService<AgentPresetsService>(ctx, 'agentPresets')
+      if (!persistence || !presets) return undefined
+      const stored = (await persistence.list()).find((header) => header.id === sessionId)
+      if (!stored) return undefined
+      const inspected = await persistence.inspect(sessionId)
+      // a subagent session is owned by its parent; resuming it standalone would split ownership
+      if (inspected.meta && inspected.meta.origin === 'subagent') return undefined
+      let presetId = inspected.meta.agentPreset
+      for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
+        const event = inspected.events[index]
+        if (event && event.type === 'agent-preset/selected' && event.data) {
+          presetId = event.data.agentPreset
+          break
+        }
+      }
+      const resolved = await presets.resolve(presetId)
+      const handle = await agents.resume({
+        resumeSessionId: sessionId,
+        setup: async (agentCtx: unknown) => {
+          await presets.mount(agentCtx, resolved.id)
+        },
+      })
+      console.log('bb: resumed persisted session ' + sessionId + ' (preset ' + resolved.id + ')')
+      return handle.agent
+    } catch (err) {
+      console.log('bb: session resume failed for ' + sessionId + ': ' + (err instanceof Error ? err.message : err))
+      return undefined
+    } finally {
+      resumeInflight.delete(sessionId)
+    }
+  })()
+  resumeInflight.set(sessionId, attempt)
+  return attempt
 }
 
 // ================= message injection =================
