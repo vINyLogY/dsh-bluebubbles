@@ -55,8 +55,14 @@ DSH webServer route  /bluebubbles/webhook  (loopback only)
 workspace.sessionIds[0] → agents.get(sessionId).send(userMessage, 'next-step', true)
    ▼
 The workspace's model wakes up and sees a message annotated
-"📱 iMessage · <chat name> · 来自 <name> (<number>)"
+"📱 iMessage · <MM-DD HH:mm UTC±N> · <chat name> · 来自 <name> (<number>)"
 ```
+
+The header stamp comes from the message's `dateCreated` (BlueBubbles hands back either Apple epoch ms
+or Unix ms — disambiguated by magnitude), rendered in the host timezone and always suffixed with the
+UTC offset. `BLUEBUBBLES_TZ` overrides the zone (e.g. `BLUEBUBBLES_TZ=Asia/Shanghai`); the year is
+prepended only when the message isn't from the current year. Messages without `dateCreated` keep the
+old header unchanged.
 
 **Anti-loop (two layers, v22+)**:
 
