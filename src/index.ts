@@ -357,12 +357,30 @@ export default {
     }
 
     // relay header timestamps render in the host timezone unless BLUEBUBBLES_TZ overrides it,
-    // and always carry the offset so the stamp stays unambiguous
-    const stampTz = process.env.BLUEBUBBLES_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone
+    // and always carry the offset so the stamp stays unambiguous. The stamp is decoration: any
+    // failure here must degrade to a plain local stamp rather than break the inbound relay path.
+    const stampTz = (() => {
+      const configured = process.env.BLUEBUBBLES_TZ
+      try {
+        if (configured && configured !== '') new Intl.DateTimeFormat('en-GB', { timeZone: configured })
+        return configured && configured !== '' ? configured : Intl.DateTimeFormat().resolvedOptions().timeZone
+      } catch {
+        // unknown/unsupported zone: stay on the host zone
+        try {
+          return Intl.DateTimeFormat().resolvedOptions().timeZone
+        } catch {
+          return ''
+        }
+      }
+    })()
 
-    function fmtStamp(ms: number): string {
-      const opts: Intl.DateTimeFormatOptions = {
-        timeZone: stampTz,
+    const tzFormatterCache = new Map<string, Intl.DateTimeFormat>()
+
+    function tzFormatter(tz: string): Intl.DateTimeFormat {
+      const cached = tzFormatterCache.get(tz)
+      if (cached) return cached
+      const created = new Intl.DateTimeFormat('en-GB', {
+        timeZone: tz,
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
@@ -370,14 +388,38 @@ export default {
         minute: '2-digit',
         hourCycle: 'h23',
         timeZoneName: 'shortOffset',
+      })
+      tzFormatterCache.set(tz, created)
+      return created
+    }
+
+    // last-resort stamp: host-local wall clock, offset derived from the Date itself
+    function localStamp(ms: number): string {
+      const d = new Date(ms)
+      const p = (n: number) => String(n).padStart(2, '0')
+      const offsetMin = -d.getTimezoneOffset()
+      const sign = offsetMin < 0 ? '-' : '+'
+      const abs = Math.abs(offsetMin)
+      const offset = 'UTC' + sign + p(Math.floor(abs / 60)) + ':' + p(abs % 60)
+      const stamp = p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+      const date = d.getFullYear() === new Date().getFullYear() ? stamp : d.getFullYear() + '-' + stamp
+      return date + ' ' + offset
+    }
+
+    function fmtStamp(ms: number): string {
+      if (stampTz === '') return localStamp(ms)
+      try {
+        const parts = tzFormatter(stampTz).formatToParts(new Date(ms))
+        const get = (t: string) => parts.find((part) => part.type === t)?.value ?? ''
+        const tz = get('timeZoneName').replace('GMT', 'UTC')
+        const curYear = tzFormatter(stampTz).formatToParts(new Date()).find((p) => p.type === 'year')?.value ?? ''
+        const date = (get('year') === curYear ? '' : get('year') + '-') + get('month') + '-' + get('day')
+        const hour = get('hour') === '24' ? '00' : get('hour')
+        return date + ' ' + hour + ':' + get('minute') + ' ' + tz
+      } catch {
+        // Intl rejected the zone at format time (small-icu builds, stale tzdata, ...)
+        return localStamp(ms)
       }
-      const parts = new Intl.DateTimeFormat('en-GB', opts).formatToParts(new Date(ms))
-      const get = (t: string) => parts.find((part) => part.type === t)?.value ?? ''
-      const tz = get('timeZoneName').replace('GMT', 'UTC')
-      const curYear = new Intl.DateTimeFormat('en-GB', { timeZone: stampTz, year: 'numeric' }).format(new Date())
-      const date = (get('year') === curYear ? '' : get('year') + '-') + get('month') + '-' + get('day')
-      const hour = get('hour') === '24' ? '00' : get('hour')
-      return date + ' ' + hour + ':' + get('minute') + ' ' + tz
     }
 
     // ---- diagnostic breadcrumbs (BLUEBUBBLES_DEBUG=1 writes to $DSH_HOME/bluebubbles-debug.log) ----
@@ -522,7 +564,12 @@ export default {
 
       const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
       const createdMs = toUnixMs(m.dateCreated)
-      const timePart = createdMs === null ? '' : ' · ' + fmtStamp(createdMs)
+      let timePart = ''
+      try {
+        if (createdMs !== null) timePart = ' · ' + fmtStamp(createdMs)
+      } catch {
+        timePart = ''
+      }
       const line = '📱 iMessage' + timePart + (chatName ? ' · ' + chatName : '') + fromPart + '\n' + body
       // next-step: opens a new turn when idle, merges into the current turn's next step boundary when busy (naturally coalesces bursts)
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {

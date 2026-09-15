@@ -61,8 +61,10 @@ The workspace's model wakes up and sees a message annotated
 The header stamp comes from the message's `dateCreated` (BlueBubbles hands back either Apple epoch ms
 or Unix ms — disambiguated by magnitude), rendered in the host timezone and always suffixed with the
 UTC offset. `BLUEBUBBLES_TZ` overrides the zone (e.g. `BLUEBUBBLES_TZ=Asia/Shanghai`); the year is
-prepended only when the message isn't from the current year. Messages without `dateCreated` keep the
-old header unchanged.
+prepended only when the message isn't from the current year. An unknown/unsupported `BLUEBUBBLES_TZ`
+falls back to the host zone, and if `Intl` rejects the zone at format time the stamp degrades to a
+plain host-local stamp — the header is decoration and never breaks inbound delivery. Messages
+without `dateCreated` keep the old header unchanged.
 
 **Anti-loop (two layers, v22+)**:
 
