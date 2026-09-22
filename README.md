@@ -5,6 +5,11 @@
 
 Bridges a local [BlueBubbles](https://bluebubbles.app) server (the macOS iMessage bridge) into DeepSeek Harness.
 
+> **DSH version support:** verified against the `0.1.1-rc.x` line (see the CI badge above).
+> The `0.1.5-rc.x` line is **not supported yet** — it ships breaking changes to the harness
+> surface this bridge binds to, so stay on `0.1.1-rc.x` until a compatibility pass lands.
+> Please don't file 0.1.5 breakage as a bridge bug; there is nothing to fix on this side yet.
+
 Design principle (Unix philosophy): **the host plugin keeps only passive capabilities** (webhook receive + binding resolution + message injection) and **two high-frequency model tools** (send text / send attachment); everything else converges into the `bb-channel` CLI — agents call it via bash, humans and automation scripts use it directly.
 
 ## Components
@@ -149,7 +154,7 @@ into the profile's own `cordis.patch.yml` instead (see below).
 
 ## Tech stack
 
-- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version).
+- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version). The `0.1.5-rc.x` line is untested and currently unsupported.
 - **Zero build**: Node ≥ 23.6 native type stripping; composition rows point straight at `src/index.ts`.
 - The CLI is plain Node ESM (`bin/bb-channel.mjs`), zero dependencies, global `fetch`/`FormData` — deliberately `.mjs` so it runs on any modern Node and stays ESM wherever it is symlinked.
 - Bootstrap: `npm install --cache ./.npm-cache && npm run typecheck`.
