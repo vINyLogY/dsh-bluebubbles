@@ -674,6 +674,12 @@ export default {
         if (!sessionId || !event || typeof event.type !== 'string') return
         const trigger = inboundTriggers.get(sessionId)
         if (!trigger) return
+        // A trigger outlives the TTL only through the error path at turn/end, so
+        // expire it here too: an ancient inbound must never relay a later turn.
+        if (Date.now() - trigger.setAt > RELAY_TRIGGER_TTL_MS) {
+          void clearTrigger(sessionId)
+          return
+        }
         if (event.type === 'turn/start' || event.type === 'step/start') {
           if (!trigger.typing) return
           const now = Date.now()
@@ -695,7 +701,16 @@ export default {
           void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
-        if (event.type === 'turn/end') void clearTrigger(sessionId)
+        if (event.type === 'turn/end') {
+          // A turn that ended in an error produced no reply, so the inbound that
+          // armed this trigger is still owed an answer: keep it and let the next
+          // successful turn relay (bounded by the TTL check above). Every other
+          // ending — including NO_REPLY, which clears the trigger further up —
+          // retires the trigger as before.
+          const reason = event.data && event.data.reason
+          const failed = Boolean(reason && reason.kind === 'error')
+          if (!failed) void clearTrigger(sessionId)
+        }
       } catch {
         // an event listener must never disturb the session event stream
       }
