@@ -468,10 +468,75 @@ export default {
       }
     }
 
+    // ================= quoted-reply rendering =================
+    // iMessage stamps a parent guid (`replyToGuid`) on essentially every message, not
+    // only on an explicit swipe-reply, and that default parent is just the previous
+    // message of the chat. The pointer alone therefore cannot tell a real quote from
+    // the chain, so remember the last message guid per chat and render a quote only
+    // when the parent is something else. Tapbacks already carry their quoted text
+    // (BlueBubbles renders them as "很疑惑：…"), so they are excluded to avoid doubling
+    // the quote. Only ever an extra read per genuine quote: the common chain case
+    // short-circuits on the remembered guid.
+    const QUOTE_EXCERPT_MAX = 40
+    const lastGuidByChat = new Map<string, string>()
+
+    /** Collapse whitespace and cut to the excerpt length without splitting a surrogate pair. */
+    function quoteExcerpt(raw: unknown): string | null {
+      if (typeof raw !== 'string') return null
+      const flat = raw.replace(/\s+/g, ' ').trim()
+      if (flat === '') return null
+      const chars = Array.from(flat)
+      return chars.length > QUOTE_EXCERPT_MAX ? chars.slice(0, QUOTE_EXCERPT_MAX).join('') + '…' : flat
+    }
+
+    async function fetchParentMessage(guid: string): Promise<any | null> {
+      const res = await curl('GET', 'message/' + encodeURIComponent(guid), null)
+      if (!res.ok || !res.data || typeof res.data !== 'object') {
+        await dbg('quote:parent fetch failed ' + guid + ' (' + (res.error || 'empty response') + ')')
+        return null
+      }
+      return res.data as any
+    }
+
+    /** Who sent a message: the relayed account itself, or a resolved display name. */
+    function authorLabel(message: Record<string, any>): string {
+      if (message.isFromMe === true) return '我'
+      const handle = (message.handle && typeof message.handle === 'object') ? message.handle : {}
+      const address = typeof handle.address === 'string' && handle.address !== '' ? handle.address : null
+      const named = typeof handle.displayName === 'string' && handle.displayName !== '' ? handle.displayName : null
+      return named || (address ? state.contacts[address] : null) || address || '对方'
+    }
+
+    /** "↪ 引用（作者）：「…」" for a swipe-reply, empty string when there is nothing to quote. */
+    async function quotedReplyBlock(m: Record<string, any>, previousGuid: string | undefined): Promise<string> {
+      const replyToGuid = typeof m.replyToGuid === 'string' && m.replyToGuid !== '' ? m.replyToGuid : null
+      if (!replyToGuid) return ''
+      // a tapback is already rendered as "<reaction>：<quoted text>" by the server
+      if (m.associatedMessageGuid || m.associatedMessageType) return ''
+      // no memory of this chat yet (right after a restart): stay quiet rather than
+      // quote the previous message by mistake
+      if (previousGuid === undefined) return ''
+      if (replyToGuid === previousGuid) return ''
+      const parent = await fetchParentMessage(replyToGuid)
+      if (!parent) return ''
+      const excerpt = quoteExcerpt(parent.text)
+        || (Array.isArray(parent.attachments) && parent.attachments.length > 0 ? '（附件）' : null)
+      if (!excerpt) return ''
+      await dbg('quote rendered for ' + (m.guid || '?') + ' → parent ' + replyToGuid + ' from ' + authorLabel(parent))
+      return '↪ 引用（' + authorLabel(parent) + '）：「' + excerpt + '」\n\n'
+    }
+
     async function processEvent(event: { type?: string; data?: any } | null): Promise<void> {
       if (!event || event.type !== 'new-message') return
       const m = event.data || {}
       const text = m.text
+      // Remember the message right before this one per chat, for the quote heuristic
+      // above. This is recorded before every drop decision on purpose: echoed bridge
+      // sends and duplicate webhook deliveries are still "previous messages" for the
+      // phone, and forgetting them would make the chain look like a real quote.
+      const chatGuidEarly: string | null = (Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || null
+      const previousGuid = chatGuidEarly ? lastGuidByChat.get(chatGuidEarly) : undefined
+      if (chatGuidEarly && typeof m.guid === 'string' && m.guid !== '') lastGuidByChat.set(chatGuidEarly, m.guid)
       const attachments: any[] = Array.isArray(m.attachments) ? m.attachments : []
       const hasText = typeof text === 'string' && text.trim() !== ''
       await dbg('event guid=' + (m.guid || '?') + ' isFromMe=' + m.isFromMe + ' sender=' + (m.handle && m.handle.address || '?') + ' tempGuid=' + (m.tempGuid || '?') + ' chats0=' + ((Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || '?') + ' text=' + String(text || '').slice(0, 40))
@@ -562,7 +627,7 @@ export default {
         || (sender && state.contacts[sender]) || null
       const fromPart = sender ? ' · 来自 ' + (senderName ? senderName + '（' + sender + '）' : sender) : ''
 
-      const body = (hasText ? text : '(无文字内容的消息)') + attachmentBlock
+      const body = (await quotedReplyBlock(m, previousGuid)) + (hasText ? text : '(无文字内容的消息)') + attachmentBlock
       const createdMs = toUnixMs(m.dateCreated)
       let timePart = ''
       try {

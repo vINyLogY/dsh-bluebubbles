@@ -75,6 +75,14 @@ A blanket `isFromMe` drop is not an option: phones on the same Apple ID also pro
 
 **Sender display name**: `payload.handle.displayName` → `~/.dsh/bluebubbles-contacts.json` (address→name, maintained via `bb-channel set-contact`) → bare number.
 
+**Quoted replies (swipe-reply)**: iMessage stamps `replyToGuid` on essentially every message, and its default parent is just the previous message of the chat — the pointer alone therefore cannot tell a real quote from that chain (measured: 35 of 40 consecutive messages carried a `replyToGuid` and all 35 pointed at their predecessor). The bridge remembers the last message guid per chat and renders a quote **only when the parent is something else**, by reading that message back from BlueBubbles:
+
+```
+↪ 引用（<author>）：「<parent text, whitespace collapsed, 40 chars + …>」
+```
+
+The author is `我` for a message the relayed account itself sent; otherwise it resolves through the same chain the header uses (`payload.handle.displayName` → contacts → bare address), with `对方` as the last resort. A self-chat DM typed on another Mac that shares the Apple ID also arrives as `isFromMe`, and that label cannot tell those apart. Tapbacks are excluded — BlueBubbles already renders them as `很疑惑：<quoted text>`, so quoting again would double it. A parent without text renders `（附件）` when it has attachments, and a parent that cannot be read silently drops the line (the message itself is still delivered). The per-chat memory lives in process, so the first inbound message after a plugin reload never quotes: staying quiet beats quoting the wrong line. The remembered guid is updated before the drop decisions, because echoed bridge sends and duplicate webhook deliveries are still "the previous message" as far as the phone is concerned.
+
 ## Relay auto-delivery (same mode for inbound and cron)
 
 With `relay: true` on a binding, the bridge registers a reply trigger for the woken session (persisted to `bluebubbles-relay-state.json`, 10min TTL, cleared on `turn/end`; an exact `NO_REPLY` reply suppresses delivery). During that turn, every assistant message containing text parts is sent back to the chat immediately — thinking and tool results are never delivered.
