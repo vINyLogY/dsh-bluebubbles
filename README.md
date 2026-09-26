@@ -181,6 +181,8 @@ into the profile's own `cordis.patch.yml` instead (see below).
 
 ## Tech stack
 
+The optional [legacy ChatCompletions compatibility plugin](compat/chat-completions/README.md) is a separate, explicitly configured DSH 0.1.7-rc.2-only provider; installing this bridge does not activate it. Inbound producer attribution uses the real session header: format 0 retains the legacy wrapper and format 4 uses its official producer-owned spelling. Missing or other formats refuse delivery rather than guessing a future schema.
+
 - **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version). The `0.1.5-rc.x` line is untested and currently unsupported.
 - **Zero build**: Node ≥ 23.6 native type stripping; composition rows point straight at `src/index.ts`.
 - The CLI is plain Node ESM (`bin/bb-channel.mjs`), zero dependencies, global `fetch`/`FormData` — deliberately `.mjs` so it runs on any modern Node and stays ESM wherever it is symlinked.

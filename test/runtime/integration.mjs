@@ -55,6 +55,7 @@ const { default: Subprocess } = await pkg('dsh-subprocess-local')
 const { default: Bash } = await pkg('dsh-bash-local')
 const { default: Defaults } = await pkg('dsh-agent-default-model')
 const { default: Approval } = await pkg('dsh-user-approval')
+const CheckpointPolicy = await pkg('dsh-session-checkpoint-policy')
 if (modern) {
   const { evaluatePluginCompatibility } = await pkg('dsh-app-boot')
   const manifest = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'))
@@ -149,6 +150,10 @@ test('real runtime cold-resumes two fixed bindings and keeps replies and guards 
     await mount(Presets, { default: 'fixture-preset', includeUserRoot: false, roots: [{ path: presetRoot, trust: 'system' }] })
   }
   await mount(AgentLoop)
+  // Match the shipped profile's durability boundary. Without this service,
+  // an invalid source can look successful in memory but fail before a real
+  // provider request when the production profile validates its checkpoint.
+  await mount(CheckpointPolicy)
   await mount(Approval, { policy: 'ask' })
   const requests = []
   const toolInputs = new Set()
@@ -158,7 +163,7 @@ test('real runtime cold-resumes two fixed bindings and keeps replies and guards 
     }
     async *stream(options) {
       requests.push(options)
-      const input = options.messages.findLast(message => message.role === 'user' && (message.source?.kind === 'user' || message.source?.plugin === 'dsh-bluebubbles'))
+      const input = options.messages.findLast(message => message.role === 'user' && (message.source?.kind === 'user' || message.source?.plugin === 'dsh-bluebubbles' || message.source?.kind === 'plugin:dsh-bluebubbles'))
       assert.ok(input, 'provider request has no user or bridge input')
       const body = input.content.filter(part => part.type === 'text').map(part => part.text).join(' ')
       if (body.includes('fail-next')) throw new Error('synthetic provider error')
@@ -201,6 +206,11 @@ test('real runtime cold-resumes two fixed bindings and keeps replies and guards 
     assert.equal(ctx.agents.get(id), undefined)
     await deliver(index, `cold-message-${index}`)
     assert.equal(ctx.agents.get(id).id, id)
+    const session = ctx.agents.get(id).session
+    assert.equal(session.header.version, modern ? 4 : 0, 'actual resumed SDK session must use the expected native format')
+    const inbound = eventsOf(session).find(event => event.type === 'user/message' && event.data.content.some(block => block.type === 'text' && block.text.includes(`cold-message-${index}`)))
+    assert.ok(inbound, 'checkpointed inbound message missing')
+    assert.deepEqual(inbound.data.source, modern ? {kind:'plugin:dsh-bluebubbles'} : {kind:'plugin',plugin:'dsh-bluebubbles'})
     assert.equal(ctx.agents.get(id).options.provider, 'fixture-provider')
     assert.equal(ctx.agents.get(id).options.model, 'fixture-model')
   }

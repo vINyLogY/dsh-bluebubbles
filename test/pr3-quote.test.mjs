@@ -14,7 +14,7 @@ process.env.BLUEBUBBLES_DEBUG = '0'
 async function fixture({ parents = {}, lookupError, lookupResult } = {}) {
   const delivered = [], parentRequests = [], files = new Map()
   let route, bridge
-  const agent = { send: message => delivered.push(message.content[0].text) }
+  const agent = { session: { header: { version: 0 } }, send: message => delivered.push(message.content[0].text) }
   const fs = {
     resolve: async path => path,
     readText: async path => {
