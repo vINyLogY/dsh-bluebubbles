@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { Session } from '@deepseek-ai/dsh-session'
 import { sendUserMessage } from '../src/lib.ts'
-test('inbound producer spelling uses the real runtime durable Session format', () => {
-  const session=Session.create('synthetic-producer-source')
-  assert.ok([0,4].includes(session.header.version))
-  for (const plugin of ['dsh-bluebubbles','dsh-heartbeat','dsh-cron']) {
+// Root unit tests use the public header shape only: importing the concrete
+// Session also loads host peers deliberately installed only by runtime jobs.
+// Those jobs assert real headers, checkpoint admission, dispatch and relay.
+test('inbound producer spelling follows both supported public header formats', () => {
+  for (const version of [0,4]) for (const plugin of ['dsh-bluebubbles','dsh-heartbeat','dsh-cron']) {
+    const session={header:{version}}
     const sent=[]
     const agent={session,send:(message,target,wake)=>sent.push({message,target,wake})}
     assert.equal(sendUserMessage({get:()=>agent},'synthetic','synthetic input',plugin,'next-step'),true)

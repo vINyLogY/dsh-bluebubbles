@@ -206,6 +206,11 @@ test('real runtime cold-resumes two fixed bindings and keeps replies and guards 
     assert.equal(ctx.agents.get(id), undefined)
     await deliver(index, `cold-message-${index}`)
     assert.equal(ctx.agents.get(id).id, id)
+    const session = ctx.agents.get(id).session
+    assert.equal(session.header.version, modern ? 4 : 0, 'actual resumed SDK session must use the expected native format')
+    const inbound = eventsOf(session).find(event => event.type === 'user/message' && event.data.content.some(block => block.type === 'text' && block.text.includes(`cold-message-${index}`)))
+    assert.ok(inbound, 'checkpointed inbound message missing')
+    assert.deepEqual(inbound.data.source, modern ? {kind:'plugin:dsh-bluebubbles'} : {kind:'plugin',plugin:'dsh-bluebubbles'})
     assert.equal(ctx.agents.get(id).options.provider, 'fixture-provider')
     assert.equal(ctx.agents.get(id).options.model, 'fixture-model')
   }
