@@ -5,10 +5,25 @@
 
 Bridges a local [BlueBubbles](https://bluebubbles.app) server (the macOS iMessage bridge) into DeepSeek Harness.
 
-> **DSH version support:** verified against the `0.1.1-rc.x` line (see the CI badge above).
-> Newer DSH lines, including `0.1.5-rc.x` and `0.1.7-rc.x`, need a separate
-> compatibility port; their persistence and shell APIs differ. Stay on the
-> verified `0.1.1-rc.x` line until that port is released.
+> **DSH version support:** the supported host versions are `0.1.1-rc.1`,
+> `0.1.1-rc.2`, and `0.1.7-rc.2`. CI tests locked legacy and next runtime
+> cohorts with real session persistence, agents, shell execution, and two cold
+> session-bound webhook routes. `0.1.5` and other untested prereleases are not
+> supported. The optional, exact host peer declaration lets DSH check compatibility
+> without installing another CLI into the plugin.
+
+The bridge feature-detects the legacy/new shell and persistence APIs. Cold resume
+keeps binding IDs and presets, restores a valid persisted model/token limit or
+the configured default model, and preserves reasoning effort where supported.
+Later web/UI model selections remain authoritative. The newer persistence backend
+can migrate legacy session headers into a separate generation without changing
+the original file; the legacy backend continues appending to its existing log.
+
+Upgrading the host is a separate deployment step: back up the DSH home and pinned
+runtime, install a complete locked runtime cohort, and verify the new profile and
+preset registry configuration before switching it. These tests use synthetic
+sessions and a loopback fake BlueBubbles server; they do not migrate live data or
+send real iMessages. See [runtime test setup](test/runtime/README.md).
 
 Design principle (Unix philosophy): **the host plugin keeps only passive capabilities** (webhook receive + binding resolution + message injection) and **two high-frequency model tools** (send text / send attachment); everything else converges into the `bb-channel` CLI — agents call it via bash, humans and automation scripts use it directly.
 

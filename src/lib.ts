@@ -30,17 +30,17 @@ export interface AgentsService {
   }): Promise<{ agent: Agent }>
 }
 interface StoredSession {
-    meta: { id: string; origin?: string; agentPreset?: string }
-    events: ReadonlyArray<{
-      type?: string
-      data?: {
-        agentPreset?: string
-        header?: {
-          config?: { provider?: string; model?: string; reasoningEffort?: string; maxTokens?: number }
-          adapterDefaults?: { reasoningEffort?: true }
-        }
+  meta: { id: string; origin?: string; agentPreset?: string }
+  events: ReadonlyArray<{
+    type?: string
+    data?: {
+      agentPreset?: string
+      header?: {
+        config?: { provider?: string; model?: string; reasoningEffort?: string; maxTokens?: number }
+        adapterDefaults?: { reasoningEffort?: true }
       }
-    }>
+    }
+  }>
 }
 export interface SessionPersistenceService {
   list(): Promise<ReadonlyArray<{ id?: string; header?: { id: string } }>>
