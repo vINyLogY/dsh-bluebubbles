@@ -181,18 +181,21 @@ export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined,
       let model: string | undefined
       let maxTokens: number | undefined
       for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
-        const config = inspected.events[index]?.data?.header?.config
-        if (config && typeof config.provider === 'string' && typeof config.model === 'string') {
+        const event = inspected.events[index]
+        const config = event?.type === 'request/header' ? event.data?.header?.config : undefined
+        if (config && typeof config.provider === 'string' && config.provider.trim() !== '' && typeof config.model === 'string' && config.model.trim() !== '') {
           provider = config.provider
           model = config.model
-          if (typeof config.maxTokens === 'number') maxTokens = config.maxTokens
+          if (typeof config.maxTokens === 'number' && Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0) maxTokens = config.maxTokens
           break
         }
       }
       if (!provider || !model) {
         const fallback = getService<AgentDefaultModelService>(ctx, 'agentDefaultModel')?.currentSelection?.()
-        provider = provider ?? fallback?.provider
-        model = model ?? fallback?.model
+        if (typeof fallback?.provider === 'string' && fallback.provider.trim() !== '' && typeof fallback.model === 'string' && fallback.model.trim() !== '') {
+          provider = fallback.provider
+          model = fallback.model
+        }
       }
       if (!provider || !model) {
         console.log('bb: session resume skipped for ' + sessionId + ': no model selection available')
