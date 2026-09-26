@@ -80,6 +80,16 @@ A blanket `isFromMe` drop is not an option: phones on the same Apple ID also pro
 
 **Sender display name**: `payload.handle.displayName` → `~/.dsh/bluebubbles-contacts.json` (address→name, maintained via `bb-channel set-contact`) → bare number.
 
+**Quoted replies (swipe-reply)**: iMessage stamps `replyToGuid` on essentially every message, and its default parent is just the previous message of the chat — the pointer alone therefore cannot tell a real quote from that chain (measured: 35 of 40 consecutive messages carried a `replyToGuid` and all 35 pointed at their predecessor). The bridge remembers the last message guid per chat and renders a quote **only when the parent is something else**, by reading that message back from BlueBubbles:
+
+```
+↪ 引用（<author>）：「<parent text, whitespace collapsed, 40 chars + …>」
+```
+
+The author is `我` for a message the relayed account itself sent; otherwise it resolves through the same chain the header uses (`payload.handle.displayName` → contacts → bare address), with `对方` as the last resort. A self-chat DM typed on another Mac that shares the Apple ID also arrives as `isFromMe`, and that label cannot tell those apart. Tapbacks are excluded — BlueBubbles already renders them as `很疑惑：<quoted text>`, so quoting again would double it. The parent lookup explicitly requests attachments: a parent without text renders `（附件）` when it has attachments. A failed lookup, including a shell infrastructure exception, drops only the quote line; the incoming message itself is still delivered.
+
+The per-chat memory lives in process, so the first inbound message after a plugin reload never quotes. The first webhook observation of a bridge-send echo advances memory before its anti-loop drop, even if the REST send already registered its guid for delivery dedup. Repeated observations do not advance it; this separate observation cache retains the latest 500 unique guids. A message whose creation timestamp is older than the latest remembered timestamp is delivered without a quote and does not rewind memory, since its actual predecessor is unknown. When timestamps are absent or equal, new observations use arrival order. This remains a heuristic: missed webhooks or ambiguous ordering can prevent accurate quote detection.
+
 ## Relay auto-delivery (same mode for inbound and cron)
 
 With `relay: true` on a binding, the bridge registers a reply trigger for the woken session (persisted to `bluebubbles-relay-state.json`). Idle triggers expire after ten minutes at the next `turn/start`, and stale persisted triggers are ignored at startup. Once a turn starts, replies remain deliverable even when the task takes longer than ten minutes. Every `turn/end`, including an error, clears the trigger; retrying needs a fresh inbound message or explicit `armRelay` call. An exact `NO_REPLY` reply also clears it. During that turn, every assistant message containing text parts is sent back to the chat immediately — thinking and tool results are never delivered.
