@@ -21,3 +21,34 @@ jobs:
       # Integration: install THIS commit's tree into a throwaway profile through
       # the real consumer path and assert the bundle rows compose.
       - run: npm run test:integration
+
+  runtime:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cohort: [legacy, next]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Install each exact runtime lock in isolation. The source stays at its
+      # real checkout path; only its dependencies point to the selected cohort.
+      - name: Install pinned runtime
+        shell: bash
+        run: |
+          runtime_dir="$RUNNER_TEMP/dsh-runtime-${{ matrix.cohort }}"
+          mkdir -p "$runtime_dir"
+          cp test/runtime/${{ matrix.cohort }}/package*.json "$runtime_dir/"
+          if [ '${{ matrix.cohort }}' = legacy ]; then
+            npm ci --prefix "$runtime_dir" --ignore-scripts --legacy-peer-deps
+          else
+            npm ci --prefix "$runtime_dir" --ignore-scripts
+          fi
+          ln -s "$runtime_dir/node_modules" node_modules
+          echo "DSH_RUNTIME_NODE_MODULES=$runtime_dir/node_modules" >> "$GITHUB_ENV"
+          echo "DSH_RUNTIME_COHORT=${{ matrix.cohort }}" >> "$GITHUB_ENV"
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:runtime

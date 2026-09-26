@@ -12,7 +12,7 @@ import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import { ensureLiveAgent, getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage } from './lib.ts'
+import { ensureLiveAgent, getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
 import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
 
 interface WebServerService {
@@ -72,7 +72,7 @@ export default {
         command = "curl -sS -m 30 -X " + method + " -H 'Content-Type: application/json' --data-raw '" + json + "' '" + shEscape(url) + "'"
       }
       const spec: ShellExecSpec = ctx.shell.resolve({ command, timeoutMs: 35000, stdoutMaxBytes: 262144 } satisfies ShellExecRequest)
-      const run: ShellRunResult = await ctx.shell.run(spec)
+      const run: ShellRunResult = await runShell(ctx.shell, spec)
       if (run.exitCode !== 0) {
         const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : (run.stdout ? run.stdout.text : '')).trim()
         return { ok: false, error: 'curl exit ' + run.exitCode + (run.timedOut ? ' (timeout)' : '') + (detail ? ': ' + detail.slice(0, 300) : '') }
@@ -102,7 +102,7 @@ export default {
       parts.push("'" + shEscape(url) + "'")
       const command = parts.join(' ')
       const spec: ShellExecSpec = ctx.shell.resolve({ command, timeoutMs: 70000, stdoutMaxBytes: 262144 } satisfies ShellExecRequest)
-      const run: ShellRunResult = await ctx.shell.run(spec)
+      const run: ShellRunResult = await runShell(ctx.shell, spec)
       if (run.exitCode !== 0) {
         const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : (run.stdout ? run.stdout.text : '')).trim()
         return { ok: false, error: 'curl exit ' + run.exitCode + (run.timedOut ? ' (timeout)' : '') + (detail ? ': ' + detail.slice(0, 300) : '') }
@@ -239,7 +239,7 @@ export default {
       try {
         // the shell executor strips managed DSH_* env vars, so derive the directory JS-side
         const dir = state.bindingsPath.replace(/\/[^/]*$/, '')
-        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
+        await runShell(ctx.shell, ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
         const target = await fs.resolve(state.bindingsPath)
         await fs.writeText(target, JSON.stringify(state.bindings, null, 2))
       } catch (err) {
@@ -451,11 +451,11 @@ export default {
       const safe = (name.replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'attachment')
       const filePath = dir + '/' + guid + '-' + safe
       try {
-        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
+        await runShell(ctx.shell, ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
         const url = endpoint('attachment/' + encodeURIComponent(guid) + '/download')
         const command = "curl -sS -f -m 60 -o '" + shEscape(filePath) + "' '" + shEscape(url) + "'"
         const spec = ctx.shell.resolve({ command, timeoutMs: 70000, stdoutMaxBytes: 4096 } satisfies ShellExecRequest)
-        const run = await ctx.shell.run(spec)
+        const run = await runShell(ctx.shell, spec)
         if (run.exitCode !== 0) {
           const detail = ((run.stderr && run.stderr.text) ? run.stderr.text : '').trim()
           console.log('bb: attachment download failed ' + guid + ': ' + (detail || 'exit ' + run.exitCode))
@@ -688,7 +688,7 @@ export default {
         const obj: Record<string, RelayTrigger> = {}
         for (const [sessionId, t] of inboundTriggers) obj[sessionId] = { ...t }
         const dir = state.relayStatePath.replace(/\/[^/]*$/, '')
-        await ctx.shell.run(ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
+        await runShell(ctx.shell, ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
         const target = await fs.resolve(state.relayStatePath)
         await fs.writeText(target, JSON.stringify(obj, null, 2))
       } catch (err) {

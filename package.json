@@ -14,7 +14,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
+    "test:runtime": "node --test test/runtime/integration.mjs",
     "test:integration": "node test/integration.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.1.1-rc.1 || 0.1.1-rc.2 || 0.1.7-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
