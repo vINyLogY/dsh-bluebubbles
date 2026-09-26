@@ -52,3 +52,33 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:runtime
+
+  chat-completions-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The optional adapter is target-only. Install two locked cohorts, but
+      # source imports resolve ONLY next; legacy is an explicit oracle path.
+      - name: Install target runtime and independent legacy oracle
+        shell: bash
+        run: |
+          target_dir="$RUNNER_TEMP/chat-compat-next"
+          oracle_dir="$RUNNER_TEMP/chat-compat-legacy"
+          mkdir -p "$target_dir" "$oracle_dir"
+          cp test/runtime/next/package*.json "$target_dir/"
+          cp test/runtime/legacy/package*.json "$oracle_dir/"
+          npm ci --prefix "$target_dir" --ignore-scripts
+          npm ci --prefix "$oracle_dir" --ignore-scripts --legacy-peer-deps
+          ln -s "$target_dir/node_modules" node_modules
+          echo "DSH_LEGACY_NODE_MODULES=$oracle_dir/node_modules" >> "$GITHUB_ENV"
+      - name: Typecheck public target adapter contracts
+        run: npm run typecheck --prefix compat/chat-completions
+      - name: Compare actual legacy wire and target adapter
+        shell: bash
+        run: env -i PATH="$PATH" DSH_LEGACY_NODE_MODULES="$DSH_LEGACY_NODE_MODULES" npm run test:chat-compat
+      - name: Boot shipped profile twice and cold-resume synthetic bindings
+        shell: bash
+        run: env -i PATH="$PATH" DSH_LEGACY_NODE_MODULES="$DSH_LEGACY_NODE_MODULES" npm run test:chat-compat-profile
