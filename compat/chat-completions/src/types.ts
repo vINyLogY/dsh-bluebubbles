@@ -10,7 +10,9 @@ export interface Config {
   maxTokens?: number; defaultContextWindow?: number; streamIdleTimeoutMs?: number; filesApiTimeoutMs?: number
   maxRequestFilesBytes?: number; maxInlineRequestImageBytes?: number; maxImagesPerRequest?: number
   imageOffloadByteQuantum?: number; inlineImageOffloadByteQuantum?: number; imageOffloadCountQuantum?: number
-  fileExpirySeconds?: number; fileRefreshMarginSeconds?: number; fileQuotaCleanupBatch?: number
+  fileExpirySeconds?: number; fileRefreshMarginSeconds?: number; fileQuotaCleanupBatch?: 0
+  /** Legacy resolved input bridge; quota cleanup is intentionally never run. */
+  filePolicy?: {expiresAfterSeconds: number; refreshMarginSeconds: number; quotaCleanupBatch?: number}
   cachePath?: string; retryPolicy?: ResolvedRetryPolicy | RetryPolicyConfig
 }
 export interface ConnectionOptions extends Config {
@@ -19,7 +21,7 @@ export interface ConnectionOptions extends Config {
   streamIdleTimeoutMs: number; filesApiTimeoutMs: number; maxRequestFilesBytes: number
   maxInlineRequestImageBytes: number; maxImagesPerRequest: number; imageOffloadByteQuantum: number
   inlineImageOffloadByteQuantum: number; imageOffloadCountQuantum: number
-  fileExpirySeconds: number; fileRefreshMarginSeconds: number; fileQuotaCleanupBatch: number
+  fileExpirySeconds: number; fileRefreshMarginSeconds: number; fileQuotaCleanupBatch: 0
 }
 export interface FileStoreBoundary {
   ensureUploaded(version: RequestImageAttachment, connection: {baseURL: string; apiKey: string}, policy: {expiresAfterSeconds: number; refreshMarginSeconds: number; quotaCleanupBatch: number}, signal?: AbortSignal): Promise<{record: {fileId: string}}>

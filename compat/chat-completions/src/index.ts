@@ -18,6 +18,7 @@ export function apply(ctx: Context, config: Config) {
   const options = () => {
     const next = resolveOptions(config)
     if (next.provider !== initial.provider) throw new LlmError('provider ownership cannot change in place','INVALID_REQUEST')
+    if (next.cachePath !== initial.cachePath) throw new LlmError('cachePath changes require plugin reload','INVALID_REQUEST')
     return next
   }
   const adapter = new ChatCompletionsCompatAdapter({

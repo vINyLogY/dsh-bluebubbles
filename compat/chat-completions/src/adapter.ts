@@ -20,6 +20,10 @@ function httpErrorCode(status: number, error: {code?:unknown;type?:unknown;messa
   if (status === 400) return isContextWindowExceededError(detail) ? CONTEXT_WINDOW_EXCEEDED_CODE : 'INVALID_REQUEST'
   return status >= 500 ? 'SERVER' : `HTTP_${status}`
 }
+function snapshotRequest(options: GenerateOptions): GenerateOptions {
+  const {signal,...data} = options
+  return {...structuredClone(data),...signal === undefined ? {} : {signal}}
+}
 export class ChatCompletionsCompatAdapter extends LlmAdapter {
   private readonly config: AdapterOptions
   private readonly files: FileStoreBoundary
@@ -38,16 +42,20 @@ export class ChatCompletionsCompatAdapter extends LlmAdapter {
     if (provider !== connection.provider) throw new LlmError('adapter does not own requested provider','NO_ADAPTER')
     const row = connection.models.find(entry => entry.id === model)
     const defaults = connection.defaults
-    return {provider,id:model,name:row?.name ?? model,inputModalities:row?.inputModalities ?? ['text'],context:{contextWindow:row?.contextWindow ?? connection.defaultContextWindow},defaultMaxTokens:row?.maxTokens ?? connection.maxTokens,
+    return {provider,id:model,name:row?.name ?? model,inputModalities:[...row?.inputModalities ?? ['text']],context:{contextWindow:row?.contextWindow ?? connection.defaultContextWindow},defaultMaxTokens:row?.maxTokens ?? connection.maxTokens,
       reasoning:{efforts:(defaults.thinking === 'disabled' ? ['off'] : ['off','low','high','max']).map(id => ({id:ReasoningEffortId(id),name:id})),defaultEffort:ReasoningEffortId(defaults.thinking === 'disabled' ? 'off' : defaults.reasoningEffort ?? 'high')}}
   }
   async resolveModel(provider: string, model: string, signal?: AbortSignal) { signal?.throwIfAborted(); return this.modelInfo(resolveOptions(this.config.options()),provider,model) }
   async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     signal?.throwIfAborted()
     const connection = resolveOptions(this.config.options())
-    return {model:this.modelInfo(connection,provider,model),stream:options => this.streamWithConnection(options,connection)}
+    return {model:this.modelInfo(connection,provider,model),stream:options => {
+      const snapshot = snapshotRequest(options)
+      if (snapshot.provider !== provider || snapshot.model !== model) throw new LlmError('prepared adapter route changed','INVALID_PREPARED_CALL')
+      return this.streamWithConnection(snapshot,connection)
+    }}
   }
-  stream(options: GenerateOptions) { return this.streamWithConnection(options,resolveOptions(this.config.options())) }
+  stream(options: GenerateOptions) { return this.streamWithConnection(snapshotRequest(options),resolveOptions(this.config.options())) }
   private async *streamWithConnection(options: GenerateOptions, connection: ConnectionOptions): AsyncIterable<StreamChunk> {
     if (options.provider !== connection.provider) throw new LlmError('adapter does not own requested provider','NO_ADAPTER')
     options.signal?.throwIfAborted()
@@ -69,6 +77,13 @@ export class ChatCompletionsCompatAdapter extends LlmAdapter {
     }
   }
   private async *request(options: GenerateOptions, connection: ConnectionOptions, signal: AbortSignal, onActivity: () => void): AsyncIterable<StreamChunk> {
+    // Validate the WHOLE request before attachment reads, credentials or file
+    // upload. A later invalid message cannot leak an earlier valid image.
+    for (const message of options.messages) {
+      if (message.role === 'developer') throw new LlmError('developer updates must be projected by LlmRuntime','UNSUPPORTED_CONTENT')
+      if ((message.role === 'assistant' || message.role === 'system') && contentHasImage(message.content)) throw new LlmError('image output/system images unsupported','UNSUPPORTED_CONTENT')
+      if (message.content.some(block => block.type === 'file' || block.type === 'tool-addition' || block.type === 'tool-removal')) throw new LlmError('request content must be projected by LlmRuntime','UNSUPPORTED_CONTENT')
+    }
     const model = connection.models.find(row => row.id === options.model)
     const retainedImages = options.messages.flatMap(message => message.content.filter(block => block.type === 'image' && !block.offloaded))
     const versions = new Map<string,RequestImageAttachment>()
