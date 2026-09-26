@@ -17,6 +17,7 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@latest --activate
       - run: npm ci --ignore-scripts --legacy-peer-deps
       - run: npm run typecheck
+      - run: npm test
       # Integration: install THIS commit's tree into a throwaway profile through
       # the real consumer path and assert the bundle rows compose.
       - run: npm run test:integration

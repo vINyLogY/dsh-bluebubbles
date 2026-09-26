@@ -674,6 +674,12 @@ export default {
         if (!sessionId || !event || typeof event.type !== 'string') return
         const trigger = inboundTriggers.get(sessionId)
         if (!trigger) return
+        // Expire idle triggers before a new turn claims them. Once a turn has
+        // started, its final response remains deliverable even after ten minutes.
+        if (event.type === 'turn/start' && Date.now() - trigger.setAt > RELAY_TRIGGER_TTL_MS) {
+          void clearTrigger(sessionId)
+          return
+        }
         if (event.type === 'turn/start' || event.type === 'step/start') {
           if (!trigger.typing) return
           const now = Date.now()
@@ -695,7 +701,11 @@ export default {
           void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
           return
         }
-        if (event.type === 'turn/end') void clearTrigger(sessionId)
+        if (event.type === 'turn/end') {
+          // An error can follow earlier assistant text. Never let its trigger
+          // forward a later unrelated web turn; retries must explicitly re-arm.
+          void clearTrigger(sessionId)
+        }
       } catch {
         // an event listener must never disturb the session event stream
       }

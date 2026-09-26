@@ -22,14 +22,29 @@ export interface AgentsService {
   list(): Agent[]
   roots(): Agent[]
   isOwnedBy(id: string, owner: Agent): boolean
-  resume(options: { resumeSessionId: string; setup?: (agentCtx: unknown) => Promise<void> }): Promise<{ agent: Agent }>
+  resume(options: {
+    resumeSessionId: string
+    /** Per-agent options (model, …); the entry point owns this selection. */
+    agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+    setup?: (agentCtx: unknown) => Promise<void>
+  }): Promise<{ agent: Agent }>
 }
 export interface SessionPersistenceService {
   list(): Promise<Array<{ id: string }>>
   inspect(id: string): Promise<{
     meta: { id: string; origin?: string; agentPreset?: string }
-    events: Array<{ type?: string; data?: { agentPreset?: string } }>
+    events: Array<{
+      type?: string
+      data?: {
+        agentPreset?: string
+        header?: { config?: { provider?: string; model?: string; maxTokens?: number } }
+      }
+    }>
   }>
+}
+/** Deployment default model selection (settings-backed). */
+export interface AgentDefaultModelService {
+  currentSelection(): { provider?: string; model?: string } | undefined
 }
 export interface AgentPresetsService {
   resolve(id?: string): Promise<{ id: string }>
@@ -156,8 +171,39 @@ export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined,
         }
       }
       const resolved = await presets.resolve(presetId)
+      // A resumed agent needs a model. This plugin IS the entry point for a
+      // chat-driven session, so the web attach path's session-local selection
+      // never runs: without this the resumed agent answers every turn with
+      // "has no provider/model". Prefer the session's own last request
+      // selection so the established request prefix (and KV cache) survives,
+      // then fall back to the deployment default from settings.
+      let provider: string | undefined
+      let model: string | undefined
+      let maxTokens: number | undefined
+      for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
+        const event = inspected.events[index]
+        const config = event?.type === 'request/header' ? event.data?.header?.config : undefined
+        if (config && typeof config.provider === 'string' && config.provider.trim() !== '' && typeof config.model === 'string' && config.model.trim() !== '') {
+          provider = config.provider
+          model = config.model
+          if (typeof config.maxTokens === 'number' && Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0) maxTokens = config.maxTokens
+          break
+        }
+      }
+      if (!provider || !model) {
+        const fallback = getService<AgentDefaultModelService>(ctx, 'agentDefaultModel')?.currentSelection?.()
+        if (typeof fallback?.provider === 'string' && fallback.provider.trim() !== '' && typeof fallback.model === 'string' && fallback.model.trim() !== '') {
+          provider = fallback.provider
+          model = fallback.model
+        }
+      }
+      if (!provider || !model) {
+        console.log('bb: session resume skipped for ' + sessionId + ': no model selection available')
+        return undefined
+      }
       const handle = await agents.resume({
         resumeSessionId: sessionId,
+        agentOptions: maxTokens === undefined ? { provider, model } : { provider, model, maxTokens },
         setup: async (agentCtx: unknown) => {
           await presets.mount(agentCtx, resolved.id)
         },

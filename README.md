@@ -5,6 +5,11 @@
 
 Bridges a local [BlueBubbles](https://bluebubbles.app) server (the macOS iMessage bridge) into DeepSeek Harness.
 
+> **DSH version support:** verified against the `0.1.1-rc.x` line (see the CI badge above).
+> Newer DSH lines, including `0.1.5-rc.x` and `0.1.7-rc.x`, need a separate
+> compatibility port; their persistence and shell APIs differ. Stay on the
+> verified `0.1.1-rc.x` line until that port is released.
+
 Design principle (Unix philosophy): **the host plugin keeps only passive capabilities** (webhook receive + binding resolution + message injection) and **two high-frequency model tools** (send text / send attachment); everything else converges into the `bb-channel` CLI — agents call it via bash, humans and automation scripts use it directly.
 
 ## Components
@@ -77,7 +82,9 @@ A blanket `isFromMe` drop is not an option: phones on the same Apple ID also pro
 
 ## Relay auto-delivery (same mode for inbound and cron)
 
-With `relay: true` on a binding, the bridge registers a reply trigger for the woken session (persisted to `bluebubbles-relay-state.json`, 10min TTL, cleared on `turn/end`; an exact `NO_REPLY` reply suppresses delivery). During that turn, every assistant message containing text parts is sent back to the chat immediately — thinking and tool results are never delivered.
+With `relay: true` on a binding, the bridge registers a reply trigger for the woken session (persisted to `bluebubbles-relay-state.json`). Idle triggers expire after ten minutes at the next `turn/start`, and stale persisted triggers are ignored at startup. Once a turn starts, replies remain deliverable even when the task takes longer than ten minutes. Every `turn/end`, including an error, clears the trigger; retrying needs a fresh inbound message or explicit `armRelay` call. An exact `NO_REPLY` reply also clears it. During that turn, every assistant message containing text parts is sent back to the chat immediately — thinking and tool results are never delivered.
+
+After a DSH restart, a bound session resumes with the provider/model from its latest valid `request/header`, including a valid output-token limit when present. Header-only sessions use the deployment default model. If neither supplies a complete model selection, the bridge logs the failure and skips delivery rather than creating an unusable agent.
 
 When `dsh-cron` fires a job whose target session has a `relay: true` binding, it arms the same mechanism through the `bluebubbles` service's `armRelay`. **Cron task prompts must not tell the model to call send tools itself** — that would double-send.
 
@@ -149,7 +156,7 @@ into the profile's own `cordis.patch.yml` instead (see below).
 
 ## Tech stack
 
-- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version).
+- **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version). The `0.1.5-rc.x` line is untested and currently unsupported.
 - **Zero build**: Node ≥ 23.6 native type stripping; composition rows point straight at `src/index.ts`.
 - The CLI is plain Node ESM (`bin/bb-channel.mjs`), zero dependencies, global `fetch`/`FormData` — deliberately `.mjs` so it runs on any modern Node and stays ESM wherever it is symlinked.
 - Bootstrap: `npm install --cache ./.npm-cache && npm run typecheck`.
