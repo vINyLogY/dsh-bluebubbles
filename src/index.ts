@@ -478,7 +478,10 @@ export default {
     // the quote. Only ever an extra read per genuine quote: the common chain case
     // short-circuits on the remembered guid.
     const QUOTE_EXCERPT_MAX = 40
-    const lastGuidByChat = new Map<string, string>()
+    const lastMessageByChat = new Map<string, { guid: string; createdMs: number | null }>()
+    // Separate from delivery dedup: a REST send can enter seenGuids before its
+    // first webhook echo, which still needs to advance the observed chat history.
+    const observedGuids = new Set<string>()
 
     /** Collapse whitespace and cut to the excerpt length without splitting a surrogate pair. */
     function quoteExcerpt(raw: unknown): string | null {
@@ -490,12 +493,19 @@ export default {
     }
 
     async function fetchParentMessage(guid: string): Promise<any | null> {
-      const res = await curl('GET', 'message/' + encodeURIComponent(guid), null)
-      if (!res.ok || !res.data || typeof res.data !== 'object') {
-        await dbg('quote:parent fetch failed ' + guid + ' (' + (res.error || 'empty response') + ')')
+      try {
+        const res = await curl('GET', 'message/' + encodeURIComponent(guid) + '?with=attachments', null)
+        if (!res.ok || !res.data || typeof res.data !== 'object') {
+          await dbg('quote:parent fetch failed ' + guid + ' (' + (res.error || 'empty response') + ')')
+          return null
+        }
+        return res.data as any
+      } catch (err) {
+        // Quotes are optional context: shell infrastructure failures must not
+        // abort delivery of the incoming message after the webhook was accepted.
+        await dbg('quote:parent fetch failed ' + guid + ' (' + (err instanceof Error ? err.message : String(err)) + ')')
         return null
       }
-      return res.data as any
     }
 
     /** Who sent a message: the relayed account itself, or a resolved display name. */
@@ -530,13 +540,22 @@ export default {
       if (!event || event.type !== 'new-message') return
       const m = event.data || {}
       const text = m.text
-      // Remember the message right before this one per chat, for the quote heuristic
-      // above. This is recorded before every drop decision on purpose: echoed bridge
-      // sends and duplicate webhook deliveries are still "previous messages" for the
-      // phone, and forgetting them would make the chain look like a real quote.
+      // First webhook observations advance history even for dropped bridge echoes.
+      // Duplicate deliveries do not represent new messages. A timestamp older than
+      // the newest observation also must not rewind history; suppress its quote
+      // because its actual predecessor is unknown to this arrival-order heuristic.
       const chatGuidEarly: string | null = (Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || null
-      const previousGuid = chatGuidEarly ? lastGuidByChat.get(chatGuidEarly) : undefined
-      if (chatGuidEarly && typeof m.guid === 'string' && m.guid !== '') lastGuidByChat.set(chatGuidEarly, m.guid)
+      const lastMessage = chatGuidEarly ? lastMessageByChat.get(chatGuidEarly) : undefined
+      const messageGuid = typeof m.guid === 'string' && m.guid !== '' ? m.guid : null
+      const messageCreatedMs = toUnixMs(m.dateCreated)
+      const olderObservation = lastMessage && lastMessage.createdMs !== null && messageCreatedMs !== null
+        && messageCreatedMs < lastMessage.createdMs
+      const previousGuid = olderObservation ? undefined : lastMessage?.guid
+      if (chatGuidEarly && messageGuid && !observedGuids.has(messageGuid)) {
+        observedGuids.add(messageGuid)
+        if (observedGuids.size > SEEN_GUIDS_MAX) observedGuids.delete(observedGuids.values().next().value!)
+        if (!olderObservation) lastMessageByChat.set(chatGuidEarly, { guid: messageGuid, createdMs: messageCreatedMs })
+      }
       const attachments: any[] = Array.isArray(m.attachments) ? m.attachments : []
       const hasText = typeof text === 'string' && text.trim() !== ''
       await dbg('event guid=' + (m.guid || '?') + ' isFromMe=' + m.isFromMe + ' sender=' + (m.handle && m.handle.address || '?') + ' tempGuid=' + (m.tempGuid || '?') + ' chats0=' + ((Array.isArray(m.chats) && m.chats[0] && m.chats[0].guid) || '?') + ' text=' + String(text || '').slice(0, 40))
