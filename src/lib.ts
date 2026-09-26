@@ -244,12 +244,20 @@ export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined,
         },
         setup: async (agentCtx: unknown) => {
           await presets.mount(agentCtx, resolved.id)
-          // 0.1.1 does not consume AgentOptions.reasoningEffort. The shared
-          // selection hook keeps default effort effective on both runtimes.
-          if (reasoningEffort !== undefined) {
-            ;(agentCtx as Context).on('agent/request', async (_payload, next) => {
+          // 0.1.1 does not consume AgentOptions.reasoningEffort. Seed its first
+          // header through the scoped request seam, then let ordinary persisted
+          // config and later UI model/effort selections own future requests.
+          if (reasoningEffort !== undefined && typeof persistence.inspect === 'function') {
+            const scoped = agentCtx as Context
+            const disposeRequest = scoped.on('agent/request', async (_payload, next) => {
               const config = await next()
-              return { ...config, provider: provider!, model: model!, reasoningEffort: reasoningEffort as ReasoningEffortId }
+              if (config.provider !== provider || config.model !== model || config.reasoningEffort !== undefined) return config
+              return { ...config, reasoningEffort: reasoningEffort as ReasoningEffortId }
+            })
+            const disposeHeader = scoped.on('session/event', (_session, event) => {
+              if (event.type !== 'request/header') return
+              void disposeRequest()
+              void disposeHeader()
             })
           }
         },

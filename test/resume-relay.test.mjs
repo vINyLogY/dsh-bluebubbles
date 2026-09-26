@@ -6,6 +6,7 @@ import { ensureLiveAgent } from '../src/lib.ts'
 function resumeFixture(id, events, fallback) {
   const calls = []
   const mounts = []
+  const listeners = new Map()
   const agent = { id }
   const services = {
     sessionPersistence: {
@@ -22,11 +23,11 @@ function resumeFixture(id, events, fallback) {
     get() {},
     async resume(options) {
       calls.push(options)
-      await options.setup({})
+      await options.setup({ on(name, listener) { listeners.set(name, listener); return () => listeners.delete(name) } })
       return { agent }
     },
   }
-  return { ctx: { get(name) { return services[name] } }, agents, agent, calls, mounts }
+  return { ctx: { get(name) { return services[name] } }, agents, agent, calls, mounts, listeners, services }
 }
 
 test('cold resume restores the latest valid request selection and output limit', async () => {
@@ -57,6 +58,57 @@ test('resume skips incomplete selections and ignores invalid token limits', asyn
   ])
   await ensureLiveAgent(invalid.ctx, invalid.agents, invalid.agent.id)
   assert.deepEqual(invalid.calls[0].agentOptions, { provider: 'p', model: 'm' })
+})
+
+test('legacy default effort seeds only the first header and never pins later model selections', async () => {
+  const fixture = resumeFixture('legacy-effort', [], { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  await ensureLiveAgent(fixture.ctx, fixture.agents, fixture.agent.id)
+  const request = async config => {
+    const listener = fixture.listeners.get('agent/request')
+    return listener ? listener({}, async () => config) : config
+  }
+  assert.equal((await request({ provider: 'p', model: 'm' })).reasoningEffort, 'high')
+  assert.deepEqual(await request({ provider: 'changed', model: 'other', reasoningEffort: 'low' }), { provider: 'changed', model: 'other', reasoningEffort: 'low' })
+  assert.equal((await request({ provider: 'p', model: 'm', reasoningEffort: 'low' })).reasoningEffort, 'low')
+  fixture.listeners.get('session/event')({}, { type: 'request/header' })
+  assert.equal(fixture.listeners.size, 0)
+  assert.deepEqual(await request({ provider: 'p', model: 'm' }), { provider: 'p', model: 'm' })
+})
+
+test('handle persistence closes observation before resume and uses native effort options', async () => {
+  const fixture = resumeFixture('handle-effort', [], { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  let closed = false
+  fixture.services.sessionPersistence = {
+    async list() { return [{ header: { id: fixture.agent.id } }] },
+    async open(id, access) {
+      assert.equal(id, fixture.agent.id)
+      assert.equal(access, 'read')
+      return {
+        header: { id, agentPreset: 'stored-preset' },
+        async read() { return { events: [] } },
+        async close() { closed = true },
+      }
+    },
+  }
+  const resume = fixture.agents.resume
+  fixture.agents.resume = options => { assert.equal(closed, true); return resume(options) }
+  await ensureLiveAgent(fixture.ctx, fixture.agents, fixture.agent.id)
+  assert.deepEqual(fixture.calls[0].agentOptions, { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  assert.equal(fixture.listeners.size, 0)
+})
+
+test('handle observation closes even when reading persisted events fails', async () => {
+  const fixture = resumeFixture('failed-read', [], { provider: 'p', model: 'm' })
+  let closed = false
+  fixture.services.sessionPersistence = {
+    async list() { return [{ header: { id: fixture.agent.id } }] },
+    async open(id) {
+      return { header: { id }, async read() { throw new Error('synthetic read failure') }, async close() { closed = true } }
+    },
+  }
+  assert.equal(await ensureLiveAgent(fixture.ctx, fixture.agents, fixture.agent.id), undefined)
+  assert.equal(closed, true)
+  assert.equal(fixture.calls.length, 0)
 })
 
 // The real plugin registers its normal listeners and service. Its filesystem,
