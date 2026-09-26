@@ -290,11 +290,19 @@ export function sendUserMessage(
 ): boolean {
   const agent = agents ? agents.get(sessionId) : undefined
   if (!agent) return false
+  // Both verified runtimes expose the actual durable Session header. Native
+  // V4 retires generic plugin wrappers; this is the official V3→V4 spelling
+  // for third-party producers, so new input and migrated history agree.
+  const formatVersion = (agent.session?.header as { version: number } | undefined)?.version
+  if (formatVersion !== 0 && formatVersion !== 4) {
+    console.log('bb: unsupported session format; input not delivered')
+    return false
+  }
   const message = {
     id: sourcePlugin + '-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: sourcePlugin },
+    source: formatVersion === 4 ? { kind: 'plugin:' + sourcePlugin } : { kind: 'plugin', plugin: sourcePlugin },
   } as unknown as UserMessage
   agent.send(message, target, true)
   return true
