@@ -1,0 +1,21 @@
+{
+  "name": "dsh-legacy-011-workflow-017-compat",
+  "version": "0.0.0-private-prototype",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.mjs" },
+  "license": "MIT",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-workflow": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-subagent": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime-node": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.1.7-rc.2"
+  }
+}
