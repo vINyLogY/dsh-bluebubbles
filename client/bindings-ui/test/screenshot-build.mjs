@@ -1,0 +1,5 @@
+import {build} from 'esbuild';
+import {mkdir,writeFile} from 'node:fs/promises';
+await mkdir('test/artifacts',{recursive:true});
+await build({entryPoints:['test/fixture.mjs'],bundle:true,outfile:'test/artifacts/fixture.js',format:'iife',define:{'process.env.NODE_ENV':'"production"'}});
+await writeFile('test/artifacts/index.html','<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic iMessage settings</title><style>body{font:14px system-ui;background:#f6f7f9;color:#182030;margin:0;padding:32px}#root{background:white;border:1px solid #dde2e8;border-radius:12px;padding:24px;max-width:760px;margin:auto}h2{margin:0}p{line-height:1.5}button,select{font:inherit;padding:8px 12px;border:1px solid #abb6c5;border-radius:6px;background:white}button:not(:disabled){cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #326de6;outline-offset:2px}button:disabled{opacity:.55}form{background:#f7f9fc;padding:16px;border-radius:8px}input{accent-color:#326de6}h3{margin-bottom:0}</style><div id="root"></div><script src="fixture.js"></script></html>');
