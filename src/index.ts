@@ -13,6 +13,9 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BindingError, readBindings, updateBindings, withBindingsLock } from './bindings-store.ts'
 
+// Only pre-send lock contention may wait; a started transport is never retried.
+export const RELAY_LOCK_WAIT_MS = 1000
+
 import { ensureLiveAgent, getService, inspectSession, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
 import type { SessionPersistenceService, AgentPresetsService } from './lib.ts'
 import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
@@ -900,9 +903,11 @@ export default {
               const current = snapshot.bindings['chat:' + trigger.chatGuid]
               if (!current || current.relay !== true || await resolveSession(workspaces, current) !== sessionId) return
               await dispatch()
-            })
+            }, RELAY_LOCK_WAIT_MS)
           }
-          const job = relayDispatchTail.then(send, send).catch(() => dbg('relay suppressed: binding changed or store unavailable'))
+          const job = relayDispatchTail.then(send, send).catch(error => dbg(error?.code === 'lock-timeout'
+            ? 'relay suppressed: binding lock deadline; not sent'
+            : 'relay suppressed: binding changed or store unavailable'))
           relayDispatchTail = job
           pendingRelays.add(job)
           void job.finally(() => pendingRelays.delete(job)).catch(() => {})

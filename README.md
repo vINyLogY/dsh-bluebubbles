@@ -184,16 +184,25 @@ protocol; conflicts require refreshing rather than automatic retry. Older CLI
 binaries and arbitrary editors that ignore the lock are not guaranteed
 compare-and-swap writers: observed
 external edits are refused, but the final compare/rename window cannot protect
-against an editor ignoring the protocol. A leftover `.lock` after a process kill
-is fail-closed; inspect it and ensure its writer has stopped before manual removal.
-Power-loss/process-kill durability has not been qualified by these tests.
+against an editor ignoring the protocol. On macOS/Linux, ownership is a native
+nonblocking POSIX file lease: the kernel releases it when the descriptor closes
+or its process dies, without stealing a live owner's lock by age. The permanent
+`.lock` carrier is never deleted; removing/replacing a live carrier defeats
+cooperative exclusion. Missing native support or an unsupported platform fails
+closed with `lock-unavailable`; there is no directory-lock fallback. Publication
+durability under power loss is not claimed.
 
 While inbound admission, a reply trigger/send, or an affected agent is active,
 management refuses changes as busy. The check and publication share an admission
 boundary; live idle agents reserve public maintenance ownership during the save.
 Before an inbound reply is sent, the bridge rechecks the canonical chat/session/
 relay association under the file lease, so a CLI unbind/rebind cannot deliver a
-late reply using a stale binding. Explicit tool sends and scheduler `armRelay`
+late reply using a stale binding. Only a relay waiting to start its send may
+wait up to one second for a contended lease; it then revalidates the canonical
+association and trigger generation. A deadline is logged as not sent, without
+stealing the live lock or retrying an already-started network request. UI/CLI
+mutations remain immediately busy and never automatically retry. Explicit tool
+sends and scheduler `armRelay`
 retain their separate authorization semantics. If a browser timeout occurs,
 the write outcome is **unknown**: refresh first; do not assume it failed or retry
 the mutation automatically. Failed saves never report success or pre-update the
@@ -239,5 +248,10 @@ The optional [legacy ChatCompletions compatibility plugin](compat/chat-completio
 
 - **TypeScript** (erasable syntax only), types from `@deepseek-ai/dsh-*` devDeps (`^0.1.1-rc.2` / cordis `^4.0.1` — see the badge above for the exact CI-verified CLI version). The `0.1.5-rc.x` line is untested and currently unsupported.
 - **Zero build**: Node ≥ 23.6 native type stripping; composition rows point straight at `src/index.ts`.
-- The CLI is plain Node ESM (`bin/bb-channel.mjs`), zero dependencies, global `fetch`/`FormData` — deliberately `.mjs` so it runs on any modern Node and stays ESM wherever it is symlinked.
+- The CLI is plain Node ESM (`bin/bb-channel.mjs`), with global `fetch`/`FormData`.
+  Run it from a complete installed package, not a copied standalone script: its
+  shared binding lease requires the pinned `@deepseek-ai/node-addon-system`
+  prebuilt native dependency. Binding writes and guarded relay support macOS
+  and Linux; unavailable/unsupported native locking fails closed. `.mjs` avoids
+  requiring TypeScript stripping for the CLI.
 - Bootstrap: `npm install --cache ./.npm-cache && npm run typecheck`.

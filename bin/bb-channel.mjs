@@ -3,7 +3,7 @@
 // Shares the same state files with the DSH bridge plugin
 // (~/.dsh/bluebubbles-{bindings,contacts}.json); the plugin hot re-reads them
 // before the next inbound message, so CLI edits take effect immediately.
-// Plain .mjs on purpose: zero dependencies, runs on any modern Node without
+// Plain .mjs on purpose: runs on modern Node without
 // the >= 23.6 type-stripping the TypeScript plugins require, and stays ESM no
 // matter where the file is symlinked or copied.
 //
@@ -11,7 +11,8 @@
 // (BLUEBUBBLES_PASSWORD / BLUEBUBBLES_BASE_URL).
 // Output is always pretty JSON (jq-friendly); errors go to stderr with exit 1.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, fsyncSync, closeSync, renameSync, unlinkSync, rmdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs'
+import { acquireBindingsLock } from '../src/bindings-lock.mjs'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
@@ -97,13 +98,13 @@ function writeJson(path, value) {
   mkdirSync(join(path, '..'), { recursive: true })
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 }
-/** Cooperative binding-store lock shared with the host. Never repair a stale
- * lock automatically: stop its owner and inspect it before manual removal.
+/** Kernel binding-store lease shared with the host; owner death releases it.
  * @param {(table:Record<string,any>)=>void} change */
-function changeBindings(change) {
+async function changeBindings(change) {
   mkdirSync(join(BINDINGS_PATH, '..'), { recursive: true, mode: 0o700 })
-  const lock = BINDINGS_PATH + '.lock', temporary = BINDINGS_PATH + '.tmp-' + randomUUID()
-  try { mkdirSync(lock, { mode: 0o700 }) } catch { die('binding store busy or unavailable; retry after its current writer finishes') }
+  const temporary = BINDINGS_PATH + '.tmp-' + randomUUID()
+  let release
+  try { release = await acquireBindingsLock(BINDINGS_PATH) } catch { die('binding store busy or native locking unavailable; use a complete supported installation') }
   try {
     let bytes = '{}'
     if (existsSync(BINDINGS_PATH)) bytes = readFileSync(BINDINGS_PATH, 'utf8')
@@ -115,8 +116,8 @@ function changeBindings(change) {
     if ((existsSync(BINDINGS_PATH) ? readFileSync(BINDINGS_PATH, 'utf8') : '{}') !== bytes) throw new Error('binding store changed concurrently')
     renameSync(temporary, BINDINGS_PATH)
   } finally {
-    if (existsSync(temporary)) unlinkSync(temporary)
-    rmdirSync(lock)
+    try { if (existsSync(temporary)) unlinkSync(temporary) }
+    finally { await release() }
   }
 }
 /** @returns {Record<string, string>} */
@@ -306,7 +307,7 @@ async function main() {
       // chat; --no-typing: disable the "typing…" indicator (on by default)
       if (hasFlag(rest, '--relay')) binding.relay = true
       if (hasFlag(rest, '--no-typing')) binding.typing = false
-      changeBindings(bindings => {
+      await changeBindings(bindings => {
         const retained = {...bindings['chat:' + chatGuid]}
         for (const key of ['sessionId', 'workspacePath', 'relay', 'typing']) delete retained[key]
         bindings['chat:' + chatGuid] = {...retained, ...binding}
@@ -318,7 +319,7 @@ async function main() {
     case 'unbind': {
       const chatGuid = pos[0] || die('unbind requires <chatGuid>')
       let existed = false
-      changeBindings(bindings => { existed = Object.prototype.hasOwnProperty.call(bindings, 'chat:' + chatGuid); delete bindings['chat:' + chatGuid] })
+      await changeBindings(bindings => { existed = Object.prototype.hasOwnProperty.call(bindings, 'chat:' + chatGuid); delete bindings['chat:' + chatGuid] })
       out({ ok: true, removed: existed })
       return
     }

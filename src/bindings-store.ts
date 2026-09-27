@@ -1,7 +1,9 @@
 // One canonical JSON file, shared by the host and bb-channel. No second settings store.
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import { mkdir, open, readFile, rename, unlink, rmdir } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
+import { acquireBindingsLock } from './bindings-lock.mjs'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export interface BindingRecord {
   sessionId?: string
@@ -29,11 +31,28 @@ export async function readBindings(path: string): Promise<BindingSnapshot> {
 
 /** Lease the canonical association through the final transport admission.
  * Repository CLI mutations cannot change it while an already-admitted send runs. */
-export async function withBindingsLock<T>(path: string, operation: (snapshot: BindingSnapshot) => Promise<T>): Promise<T> {
-  const lock = path + '.lock'
-  try { await mkdir(lock, { mode: 0o700 }) }
-  catch (error) { throw new BindingError((error as NodeJS.ErrnoException).code === 'EEXIST' ? 'busy' : 'persistence-failed') }
-  try { return await operation(await readBindings(path)) } finally { await rmdir(lock) }
+export async function withBindingsLock<T>(path: string, operation: (snapshot: BindingSnapshot) => Promise<T>, waitMs = 0): Promise<T> {
+  let release: () => Promise<void>
+  const deadline = performance.now() + waitMs
+  for (;;) {
+    try {
+      release = await acquireBindingsLock(path)
+      if (waitMs > 0 && performance.now() >= deadline) {
+        await release()
+        throw new BindingError('lock-timeout')
+      }
+      break
+    }
+    catch (error) {
+      const code = (error as {code?:string}).code ?? 'lock-unavailable'
+      if (code !== 'busy' || waitMs === 0) throw new BindingError(code)
+      const remaining = deadline - performance.now()
+      if (remaining <= 0) throw new BindingError('lock-timeout')
+      await delay(Math.min(25, remaining))
+      if (performance.now() >= deadline) throw new BindingError('lock-timeout')
+    }
+  }
+  try { return await operation(await readBindings(path)) } finally { await release() }
 }
 
 /** All repository writers serialize here. Arbitrary editors must still honor CAS;
@@ -44,9 +63,10 @@ export async function updateBindings(
   publishBoundary: (publish: () => Promise<BindingSnapshot>) => Promise<BindingSnapshot> = publish => publish(),
 ): Promise<BindingSnapshot> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  const lock = path + '.lock', temporary = path + '.tmp-' + randomUUID()
-  try { await mkdir(lock, { mode: 0o700 }) }
-  catch (error) { throw new BindingError((error as NodeJS.ErrnoException).code === 'EEXIST' ? 'busy' : 'persistence-failed') }
+  const temporary = path + '.tmp-' + randomUUID()
+  let release: () => Promise<void>
+  try { release = await acquireBindingsLock(path) }
+  catch (error) { throw new BindingError((error as {code?:string}).code ?? 'lock-unavailable') }
   try {
     const before = await readBindings(path)
     if (expectedRevision !== undefined && expectedRevision !== before.revision) throw new BindingError('conflict')
@@ -66,7 +86,7 @@ export async function updateBindings(
     if (error instanceof BindingError) throw error
     throw new BindingError('persistence-failed')
   } finally {
-    await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error })
-    await rmdir(lock)
+    try { await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error }) }
+    finally { await release() }
   }
 }

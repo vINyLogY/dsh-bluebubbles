@@ -20,7 +20,7 @@ export class BindingsController extends TypertRemoteService {
   async call(method, args) {
     try { return await this.ctx.get('bluebubbles').bindingManagement[method](args) }
     catch (error) {
-      const known = ['conflict', 'busy', 'not-found', 'preset-unavailable', 'persistence-failed', 'invalid-store', 'session-conflict', 'chat-unavailable']
+      const known = ['conflict', 'busy', 'not-found', 'preset-unavailable', 'persistence-failed', 'invalid-store', 'session-conflict', 'chat-unavailable', 'lock-unavailable']
       throw new RemoteError(known.includes(error?.code) ? error.code : 'unavailable', 'Binding operation could not complete')
     }
   }

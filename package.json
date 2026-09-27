@@ -28,6 +28,9 @@
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": { "optional": true }
   },
+  "dependencies": {
+    "@deepseek-ai/node-addon-system": "0.1.2"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/cordis-plugin-group": "^1.0.1",

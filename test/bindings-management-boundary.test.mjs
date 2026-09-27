@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { setImmediate } from 'node:timers/promises'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { readBindings, updateBindings, withBindingsLock } from '../src/bindings-store.ts'
 import bridgePlugin from '../src/index.ts'
+import { acquireBindingsLock } from '../src/bindings-lock.mjs'
 
 // All files are synthetic, in an exclusively owned mkdtemp. No live DSH,
 // BlueBubbles, credentials, provider, or session history is accessed.
@@ -36,7 +39,7 @@ test('a nonparticipating editor observed during validation is not overwritten', 
     await writeFile(path, JSON.stringify(external))
   }), errorCode('conflict'))
   assert.deepEqual((await readBindings(path)).bindings, external)
-  assert.deepEqual(await readdir(root), ['bindings.json'])
+  assert.deepEqual((await readdir(root)).sort(), ['bindings.json', 'bindings.json.lock'])
 })
 
 test('cooperating writers cannot enter a locked mutation concurrently', async t => {
@@ -60,7 +63,7 @@ test('failed validation leaves original bytes and permits the next mutation', as
   const old = await readBindings(path)
   await assert.rejects(updateBindings(path, old.revision, () => { throw new Error('synthetic failure') }), errorCode('persistence-failed'))
   assert.deepEqual(await readFile(path), before)
-  assert.deepEqual(await readdir(root), ['bindings.json'])
+  assert.deepEqual((await readdir(root)).sort(), ['bindings.json', 'bindings.json.lock'])
   await updateBindings(path, old.revision, table => { table['chat:A'].typing = false })
   assert.equal((await readBindings(path)).bindings['chat:A'].custom.retained, true)
 })
@@ -81,7 +84,7 @@ test('publication failure never returns success and cleans its temporary artifac
     // Force rename(file, directory) failure only within the owned fixture.
     await rm(path); await mkdir(path)
   }), errorCode('persistence-failed'))
-  assert.deepEqual(await readdir(root), ['bindings.json'])
+  assert.deepEqual((await readdir(root)).sort(), ['bindings.json', 'bindings.json.lock'])
 })
 
 test('transport lease blocks cooperative CLI writes and releases even on transport error', async t => {
@@ -94,7 +97,7 @@ test('transport lease blocks cooperative CLI writes and releases even on transpo
   await ready
   await assert.rejects(updateBindings(path, undefined, table => { table['chat:A'] = { sessionId: 'S' } }), errorCode('busy'))
   release(); await rejection
-  assert.deepEqual(await readdir(root), ['bindings.json'])
+  assert.deepEqual((await readdir(root)).sort(), ['bindings.json', 'bindings.json.lock'])
   await updateBindings(path, undefined, table => { table['chat:A'] = { sessionId: 'S' } })
 })
 
@@ -240,4 +243,47 @@ test('two ordinary assistant messages in one turn both relay instead of competin
   }
   await f.api.whenRelayIdle()
   assert.equal(f.sends.length, 2)
+})
+
+test('normal inbound replies recover after an actual foreign lock holder is killed', { timeout: 10000 }, async t => {
+  const f = await bridgeFixture(t, { 'chat:A': { sessionId: 'S1', relay: true, typing: false } })
+  const helper = new URL('../src/bindings-lock.mjs', import.meta.url).href
+  const program = `import {acquireBindingsLock} from ${JSON.stringify(helper)};
+    await acquireBindingsLock(process.argv[1]);process.send({locked:true});process.on('message',()=>{});`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', program, f.path], { env: {}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { const exit = once(child, 'exit'); child.kill('SIGKILL'); await exit } })
+  const [ready] = await once(child, 'message'); assert.equal(ready.locked, true)
+  const dead = once(child, 'exit'); child.kill('SIGKILL'); await dead
+  await f.inbound()
+  f.listeners.get('session/event')({ id: 'S1' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'reply after synthetic process crash' }] } } })
+  await f.api.whenRelayIdle()
+  assert.equal(f.sends.length, 1)
+  assert.match(f.sends[0], /"chatGuid":"A"/)
+})
+
+test('a short cooperating lease delays a normal relay but does not discard or duplicate it', { timeout: 10000 }, async t => {
+  const f = await bridgeFixture(t, { 'chat:A': { sessionId: 'S1', relay: true, typing: false } })
+  await f.inbound()
+  const release = await acquireBindingsLock(f.path)
+  const released = new Promise((resolve, reject) => setTimeout(() => release().then(resolve, reject), 50))
+  f.listeners.get('session/event')({ id: 'S1' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'synthetic reply after short lease' }] } } })
+  await f.api.whenRelayIdle(); await released
+  assert.equal(f.sends.length, 1)
+  assert.match(f.sends[0], /"chatGuid":"A"/)
+})
+
+test('relay lock deadline never steals a live lease or sends, and subsequent replies recover', { timeout: 10000 }, async t => {
+  const f = await bridgeFixture(t, { 'chat:A': { sessionId: 'S1', relay: true, typing: false } })
+  await f.inbound()
+  const release = await acquireBindingsLock(f.path)
+  try {
+    f.listeners.get('session/event')({ id: 'S1' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'synthetic reply beyond lock deadline' }] } } })
+    await f.api.whenRelayIdle()
+    assert.equal(f.sends.length, 0)
+    await assert.rejects(acquireBindingsLock(f.path), error => error.code === 'busy')
+  } finally { await release() }
+  f.listeners.get('session/event')({ id: 'S1' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'later synthetic reply after release' }] } } })
+  await f.api.whenRelayIdle()
+  assert.equal(f.sends.length, 1)
+  assert.match(f.sends[0], /"chatGuid":"A"/)
 })
