@@ -71,6 +71,12 @@ separate explicitly parameterized private-copy qualification, not a live probe.
 The legacy oracle runs the published old **guest** with a synthetic host JSON
 protocol, not the complete old host engine: one-child requests/events/results
 are compared exactly, while cancellation compares terminal scalars and cleanup.
+The existing pinned **next** CI job runs source syntax checks and the seven
+pure protocol/controlled-transport tests via `npm run test:workflow-compat-pure`.
+It does not substitute mocks for the separate native macOS confinement or
+private profile acceptance. Root TypeScript typechecking does not typecheck this
+JavaScript source port; actual public SDK calls and runtime controls are the
+contract evidence for those modules.
 
 Keep stock runtime/source/config/raw-history backups. Rollback restores the
 prior profile definition and removes only this opt-in row; no raw/native session
