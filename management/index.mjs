@@ -26,7 +26,10 @@ export class BindingsController extends TypertRemoteService {
   }
   list() { return this.call('list') }
   sessions() { return this.call('sessions') }
-  chats(args = {}) {
+  chats(args) {
+    // The official SRC gateway accepts identifier-only parameter signatures.
+    // Preserve JS default semantics without accepting an explicit null payload.
+    if (args === undefined) args = {}
     request(args, ['limit', 'offset'])
     for (const [key, value] of Object.entries(args)) if (!Number.isInteger(value) || value < (key === 'limit' ? 1 : 0) || value > (key === 'limit' ? 100 : 100000)) throw new RemoteError('invalid-request', 'Invalid page')
     return this.call('chats', args)

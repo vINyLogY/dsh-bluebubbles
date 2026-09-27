@@ -13,14 +13,14 @@ import {contribution} from '../../client/bindings-ui/src/contribution.mjs'
 
 test('optional management routes inherit actual Connection cookie and Origin fences', async t => {
   const ctx = new Context(), fibers = [], routes = []
-  let secret, mutations = 0
+  let secret, mutations = 0, chatCalls = 0, lastChatArgs
   // Official BrowserAuth creates/signs its own synthetic record in memory.
   ctx.provide('credentials', {async modifyRecord(_key, change) {const update = await change(secret); if (update) secret = update; return secret}})
   ctx.provide('webServer', {register(route) {routes.push(route); return () => routes.splice(routes.indexOf(route), 1)}, registerUpgrade() {return () => {}}})
   ctx.provide('bluebubbles', {bindingManagement: {
     list: () => ({revision: 'a'.repeat(64), bindings: []}),
     sessions: () => ({sessions: [{id: 'synthetic-session', status: 'cold'}]}),
-    chats: () => ({chats: [], hasMore: false, nextOffset: 0}),
+    chats: args => {chatCalls++;lastChatArgs=args;return {chats: [], hasMore: false, nextOffset: 0}},
     bind: () => {mutations++; return {revision: 'b'.repeat(64), bindings: []}},
     unbind: () => {mutations++; return {revision: 'b'.repeat(64), bindings: []}},
     updateRelay: () => {mutations++; return {revision: 'b'.repeat(64), bindings: []}},
@@ -74,4 +74,29 @@ test('optional management routes inherit actual Connection cookie and Origin fen
   assert.equal(mutations,2)
   assert.equal((await client.get('remote.bluebubblesBindings').bind({...args,password:'synthetic-forbidden'})).ok,false)
   assert.equal(mutations,2)
+  const remote=client.get('remote.bluebubblesBindings')
+  // Exercise every decorated signature through the real official browser face
+  // and HTTP gateway. SRC rejects parameter initializers before body validation.
+  const loaded=await Promise.all([remote.list(),remote.sessions(),remote.chats({offset:0,limit:50})])
+  for(const result of loaded)assert.equal(result.ok,true,JSON.stringify(result))
+  assert.deepEqual(lastChatArgs,{offset:0,limit:50});assert.equal(chatCalls,1)
+  assert.equal((await remote.unbind({chatGuid:args.chatGuid,expectedRevision:args.expectedRevision})).ok,true)
+  assert.equal((await remote.updateRelay({chatGuid:args.chatGuid,relay:false,expectedRevision:args.expectedRevision})).ok,true)
+  assert.equal(mutations,4)
+  for(const [method,value] of [['unbind',{chatGuid:args.chatGuid,expectedRevision:args.expectedRevision,extra:true}],['updateRelay',{chatGuid:args.chatGuid,expectedRevision:args.expectedRevision,relay:'false'}]]){
+    assert.equal((await remote[method](value)).ok,false)
+    const response=await call(method,cookie,{}, {args:{args:value}})
+    assert.equal((await response.json()).result.ok,false)
+  }
+  assert.equal(mutations,4)
+  // Browser validation and direct gateway validation must both stay strict.
+  for(const value of [{offset:-1},{limit:0},{limit:101},{offset:0,limit:50,password:'forbidden'},null,[]]){
+    assert.equal((await remote.chats(value)).ok,false)
+    const response=await call('chats',cookie,{}, {args:{args:value}})
+    assert.equal((await response.json()).result.ok,false)
+  }
+  assert.equal(chatCalls,1)
+  const defaultPage=await call('chats',cookie,{}, {args:{}})
+  assert.equal((await defaultPage.json()).result.ok,true);assert.deepEqual(lastChatArgs,{})
+  assert.equal(chatCalls,2)
 })
