@@ -145,6 +145,60 @@ Sessions not in the bindings table fall through to the ordinary web flow unchang
 
 **Session resolution chain**: `sessionId` direct → otherwise `workspacePath` → that workspace's `sessionIds[0]` (most recent session) → live agent. With no live agent, the bridge **resumes the persisted session on demand** (folding its stored preset, same as the web UI's attach path) — bound chats survive DSH restarts without anyone reopening them. A message is dropped and logged only when the resume itself fails (unknown session, subagent-owned session, missing preset).
 
+## Optional WebUI binding settings (DSH `0.1.7-rc.2` only)
+
+The optional page adds **Settings → iMessage** without changing the official
+WebUI. It lists existing chat summaries, sessions, and bindings; select a chat
+and an exact session, save/unbind, or toggle automatic reply delivery (`relay`).
+It does not create chats, send test messages, activate a model, or change presets.
+Session availability is a listing hint; saving validates the session's current
+effective preset (including later persisted selections), without resuming it.
+
+After installing/enabling the bridge in a `0.1.7-rc.2` Web profile, explicitly
+install the optional local package from the same release checkout:
+
+```sh
+dsh plugin --profile web add ./client/bindings-ui
+```
+
+Its opt-in bundle adds `dsh-bluebubbles/bindings-management` and the browser
+settings entry. The profile must already provide the official authenticated
+Connection/API Gateway and settings/client-module services. Reload the profile
+through your normal deployment process; this is not enabled by installing the
+legacy bridge alone. The committed `lib/client.js` asset works from a Git release
+without a local frontend build. Development builds use the client package's
+locked `npm ci && npm run build`; CI checks the committed bundle is reproducible.
+
+Management uses the existing browser authentication and Host/Origin fences,
+not anonymous webhook CRUD. Passwords, endpoint configuration, and message
+bodies are not returned by the binding API. One canonical
+`bluebubbles-bindings.json` remains shared with `bb-channel`; unknown fields and
+old workspace/legacy records are preserved. Existing dangling/conflicting
+bindings are shown, not silently repaired. New bindings are exact-session and
+reject another chat's resolved session, including workspace aliases. Changing
+relay on a workspace binding does not convert it into an exact-session binding.
+
+Saves use a byte-hash revision, a cooperative file lock, and fsynced temporary
+files published by atomic rename. The CLI from this release uses the same lock
+protocol; conflicts require refreshing rather than automatic retry. Older CLI
+binaries and arbitrary editors that ignore the lock are not guaranteed
+compare-and-swap writers: observed
+external edits are refused, but the final compare/rename window cannot protect
+against an editor ignoring the protocol. A leftover `.lock` after a process kill
+is fail-closed; inspect it and ensure its writer has stopped before manual removal.
+Power-loss/process-kill durability has not been qualified by these tests.
+
+While inbound admission, a reply trigger/send, or an affected agent is active,
+management refuses changes as busy. The check and publication share an admission
+boundary; live idle agents reserve public maintenance ownership during the save.
+Before an inbound reply is sent, the bridge rechecks the canonical chat/session/
+relay association under the file lease, so a CLI unbind/rebind cannot deliver a
+late reply using a stale binding. Explicit tool sends and scheduler `armRelay`
+retain their separate authorization semantics. If a browser timeout occurs,
+the write outcome is **unknown**: refresh first; do not assume it failed or retry
+the mutation automatically. Failed saves never report success or pre-update the
+bridge's active map. CLI updates still hot-apply on the next inbound message.
+
 ## Updating the code
 
 1. Edit `src/*.ts` → `npm run typecheck` → `git commit`

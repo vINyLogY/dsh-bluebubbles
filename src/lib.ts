@@ -87,7 +87,7 @@ export async function runShell(shell: ShellService, spec: ShellExecSpec): Promis
   throw new Error('bb: shell service has neither run nor execute')
 }
 
-async function inspectSession(persistence: SessionPersistenceService, sessionId: string): Promise<StoredSession | undefined> {
+export async function inspectSession(persistence: SessionPersistenceService, sessionId: string): Promise<StoredSession | undefined> {
   if (typeof persistence.inspect === 'function') return persistence.inspect(sessionId)
   if (typeof persistence.open !== 'function') return undefined
   const handle = await persistence.open(sessionId, 'read')
