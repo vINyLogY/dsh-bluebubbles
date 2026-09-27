@@ -15,8 +15,18 @@ const bridgeLib=process.env.DSH_COMPAT_BRIDGE_LIB
 const candidateEngine=process.env.DSH_WORKFLOW_CANDIDATE_SOURCE
 const heartbeatMetadata=process.env.DSH_HEARTBEAT_METADATA
 assert.ok(snapshot&&runtime&&output)
-assert.ok(snapshot.startsWith('/tmp/')||snapshot.startsWith('/private/tmp/'))
-assert.ok(output.startsWith('/tmp/')||output.startsWith('/private/tmp/'))
+const canonicalSpelling=p=>path.resolve(p).replace(/^\/tmp(?=\/|$)/,'/private/tmp')
+const snapshotPhysical=await fs.realpath(snapshot),outputParent=await fs.realpath(path.dirname(output)),outputPhysical=path.join(outputParent,path.basename(output))
+assert.equal(snapshotPhysical,canonicalSpelling(snapshot),'Snapshot symlink ancestor is not allowed')
+assert.equal(outputParent,canonicalSpelling(path.dirname(output)),'Output symlink ancestor is not allowed')
+assert.ok(snapshotPhysical.startsWith('/private/tmp/'),'Snapshot must be owned temporary storage')
+assert.ok(outputPhysical.startsWith('/private/tmp/'),'Output must be owned temporary storage')
+assert.ok((await fs.stat(snapshotPhysical)).isDirectory())
+assert.equal((await fs.stat(snapshotPhysical)).uid,process.getuid())
+assert.equal((await fs.stat(outputParent)).uid,process.getuid())
+const disjoint=(a,b)=>a!==b&&!a.startsWith(b+'/')&&!b.startsWith(a+'/')
+for(const protectedPath of[snapshotPhysical,await fs.realpath(runtime),...(candidateEngine?[await fs.realpath(candidateEngine)]:[])])assert.ok(disjoint(outputPhysical,protectedPath),'Output must be disjoint from all source/runtime paths')
+await assert.rejects(fs.lstat(outputPhysical),{code:'ENOENT'},'Output must be absent')
 await fs.mkdir(output,{mode:0o700})
 const home=path.join(output,'home');await fs.cp(snapshot,home,{recursive:true,preserveTimestamps:true,verbatimSymlinks:true});await fs.chmod(home,0o700)
 try{await fs.rename(home+'/.env',home+'/.env.offline-preserved')}catch(e){if(e.code!=='ENOENT')throw e}
