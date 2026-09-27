@@ -9,12 +9,14 @@
   "exports": {
     ".": "./src/index.ts",
     "./heartbeat": "./src/heartbeat.ts",
-    "./cron": "./src/cron.ts"
+    "./cron": "./src/cron.ts",
+    "./bindings-management": "./management/index.mjs"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "test:runtime": "node --test test/runtime/integration.mjs",
+    "test:bindings-management": "node --test test/management/*.test.mjs",
     "test:chat-compat": "node --test compat/chat-completions/test/*.test.mjs",
     "test:chat-compat-profile": "node compat/chat-completions/test/profile-integration.mjs",
     "test:workflow-compat-pure": "node --check compat/legacy-workflow/src/index.mjs && node --check compat/legacy-workflow/src/engine.mjs && node --check compat/legacy-workflow/src/transport.mjs && node --check compat/legacy-workflow/src/protocol.mjs && node --check compat/legacy-workflow/src/worker.cjs && node --test compat/legacy-workflow/test/protocol.test.mjs compat/legacy-workflow/test/transport.test.mjs",
@@ -25,6 +27,9 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": { "optional": true }
+  },
+  "dependencies": {
+    "@deepseek-ai/node-addon-system": "0.1.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -53,7 +58,9 @@
     "bin",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "management",
+    "client/bindings-ui"
   ],
   "dsh": {
     "bundle": {

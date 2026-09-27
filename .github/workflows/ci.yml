@@ -55,6 +55,16 @@ jobs:
       - name: Check target-only legacy workflow syntax and closed transport contracts
         if: matrix.cohort == 'next'
         run: npm run test:workflow-compat-pure
+      - name: Build and test optional authenticated binding UI
+        if: matrix.cohort == 'next'
+        shell: bash
+        run: |
+          npm ci --prefix client/bindings-ui --ignore-scripts
+          npm run build --prefix client/bindings-ui
+          git diff --exit-code -- client/bindings-ui/lib/client.js
+          npm test --prefix client/bindings-ui
+          node client/bindings-ui/test/target-loader.mjs "$DSH_RUNTIME_NODE_MODULES"
+          npm run test:bindings-management
 
   chat-completions-compat:
     runs-on: ubuntu-latest

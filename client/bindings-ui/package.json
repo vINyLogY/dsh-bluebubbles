@@ -1,0 +1,40 @@
+{
+  "name": "@vinylogy/dsh-client-imessage-bindings",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "index.mjs",
+    "lib", "cordis.patch.yml", "README.md", "THIRD-PARTY-NOTICES.txt"
+  ],
+  "peerDependencies": { "@deepseek-ai/dsh": "0.1.7-rc.2" },
+  "peerDependenciesMeta": { "@deepseek-ai/dsh": { "optional": true } },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-gateway"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
+    "esbuild": "0.25.10",
+    "jsdom": "26.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "4.1.12"
+  }
+}

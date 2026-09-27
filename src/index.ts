@@ -11,8 +11,13 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ShellExecRequest, ShellExecSpec, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { BindingError, readBindings, updateBindings, withBindingsLock } from './bindings-store.ts'
 
-import { ensureLiveAgent, getService, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
+// Only pre-send lock contention may wait; a started transport is never retried.
+export const RELAY_LOCK_WAIT_MS = 1000
+
+import { ensureLiveAgent, getService, inspectSession, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
+import type { SessionPersistenceService, AgentPresetsService } from './lib.ts'
 import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
 
 interface WebServerService {
@@ -35,6 +40,11 @@ export default {
     const agents = getService<AgentsService>(ctx, 'agents')
     const fs = getService<FsService>(ctx, 'fs')
     const workspaces = getService<WorkspaceRegistryService>(ctx, 'workspaceRegistry')
+    let bindingMutation: Promise<unknown> | undefined
+    let inboundAdmissions = 0
+    const outgoingChats = new Map<string, number>()
+    const pendingRelays = new Set<Promise<unknown>>()
+    let relayDispatchTail: Promise<unknown> = Promise.resolve()
 
     const dshHome = (process.env.DSH_HOME || process.env.HOME + '/.dsh') as string
 
@@ -176,6 +186,10 @@ export default {
     }
 
     async function sendText(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+      if (bindingMutation) await bindingMutation.catch(() => {})
+      const outgoingChat = String(args.chatGuid)
+      outgoingChats.set(outgoingChat, (outgoingChats.get(outgoingChat) || 0) + 1)
+      try {
       const tempGuid = 'dsh-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
       const method = args.method === 'private-api' ? 'private-api' : 'apple-script'
       noteSent(String(args.chatGuid), String(args.text))
@@ -189,9 +203,18 @@ export default {
       const sentGuid = result.data && (result.data as any).guid ? (result.data as any).guid : null
       if (sentGuid) seenGuids.add(sentGuid)
       return { ok: true, tempGuid, guid: sentGuid, text: result.data && (result.data as any).text ? (result.data as any).text : null }
+      } finally {
+        const remaining = (outgoingChats.get(outgoingChat) || 1) - 1
+        if (remaining) outgoingChats.set(outgoingChat, remaining)
+        else outgoingChats.delete(outgoingChat)
+      }
     }
 
     async function sendAttachment(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+      if (bindingMutation) await bindingMutation.catch(() => {})
+      const outgoingChat = String(args.chatGuid)
+      outgoingChats.set(outgoingChat, (outgoingChats.get(outgoingChat) || 0) + 1)
+      try {
       const filePath = String(args.filePath)
       const tempGuid = 'dsh-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
       const name = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : (filePath.split('/').pop() || 'attachment')
@@ -207,6 +230,11 @@ export default {
       const sentGuid = result.data && (result.data as any).guid ? (result.data as any).guid : null
       if (sentGuid) seenGuids.add(sentGuid)
       return { ok: true, tempGuid, name, guid: sentGuid }
+      } finally {
+        const remaining = (outgoingChats.get(outgoingChat) || 1) - 1
+        if (remaining) outgoingChats.set(outgoingChat, remaining)
+        else outgoingChats.delete(outgoingChat)
+      }
     }
 
     // ================= state files (bindings + contacts) =================
@@ -234,17 +262,80 @@ export default {
       if (c) state.contacts = c as Record<string, string>
     }
 
-    async function saveBindings(): Promise<void> {
-      if (!fs) return
+    async function bindingView() {
+      const snapshot = await readBindings(state.bindingsPath)
+      const persistence = getService<SessionPersistenceService>(ctx, 'sessionPersistence')
+      const existing = persistence ? new Set((await persistence.list()).map(row => row.header?.id ?? row.id)) : new Set<string>()
+      const targets = await Promise.all(Object.entries(snapshot.bindings).map(async ([key, row]) => ({key, row, resolved: await resolveSession(workspaces, row)})))
+      return { revision: snapshot.revision, bindings: targets.map(({key, row, resolved}) => ({
+        key, chatGuid: key.startsWith('chat:') ? key.slice(5) : null,
+        sessionId: typeof row.sessionId === 'string' ? row.sessionId : null,
+        workspacePath: typeof row.workspacePath === 'string' ? row.workspacePath : null,
+        relay: row.relay === true, typing: row.typing !== false,
+        status: !resolved || !existing.has(resolved) ? 'dangling' : 'bound',
+        conflict: !!resolved && targets.some(other => other.key !== key && other.resolved === resolved),
+      })) }
+    }
+
+    async function validateBindingSession(id: string) {
+      const persistence = getService<SessionPersistenceService>(ctx, 'sessionPersistence')
+      const presets = getService<AgentPresetsService>(ctx, 'agentPresets')
+      if (!persistence || !presets) throw new BindingError('preset-unavailable')
+      if (!(await persistence.list()).some(row => (row.header?.id ?? row.id) === id)) throw new BindingError('not-found')
+      const stored = await inspectSession(persistence, id)
+      if (!stored || stored.meta.origin === 'subagent') throw new BindingError('not-found')
+      let presetId = stored.meta.agentPreset
+      for (const event of stored.events) if (event.type === 'agent-preset/selected') presetId = event.data?.agentPreset
       try {
-        // the shell executor strips managed DSH_* env vars, so derive the directory JS-side
-        const dir = state.bindingsPath.replace(/\/[^/]*$/, '')
-        await runShell(ctx.shell, ctx.shell.resolve({ command: 'mkdir -p "' + shEscape(dir) + '"', timeoutMs: 8000 }))
-        const target = await fs.resolve(state.bindingsPath)
-        await fs.writeText(target, JSON.stringify(state.bindings, null, 2))
-      } catch (err) {
-        console.log('bb: bindings write failed (degrading to in-memory): ' + (err instanceof Error ? err.message : err))
-      }
+        const preset = await presets.resolve(presetId) as { id: string; broken?: string }
+        if (preset.broken) throw new BindingError('preset-unavailable')
+      } catch { throw new BindingError('preset-unavailable') }
+    }
+
+    function mutateBinding(args: {chatGuid: string; sessionId?: string; relay?: boolean; expectedRevision: string}, mode: 'bind' | 'unbind' | 'relay') {
+      if (bindingMutation) return Promise.reject(new BindingError('busy'))
+      const task = (async () => {
+        const affected = new Set<string>()
+        const snapshot = await updateBindings(state.bindingsPath, args.expectedRevision, async table => {
+          if (inboundAdmissions || outgoingChats.size || inboundTriggers.size || pendingRelays.size) throw new BindingError('busy')
+          const key = 'chat:' + args.chatGuid
+          const previous = table[key] && await resolveSession(workspaces, table[key])
+          if (previous) affected.add(previous)
+          if (args.sessionId) affected.add(args.sessionId)
+          if (mode === 'bind') {
+            const chat = await curl('GET', 'chat/' + encodeURIComponent(args.chatGuid), null)
+            if (!chat.ok || !chat.data || (chat.data as {guid?: string}).guid !== args.chatGuid) throw new BindingError('chat-unavailable')
+            await validateBindingSession(args.sessionId!)
+            for (const [otherKey, target] of Object.entries(table)) if (otherKey !== key && await resolveSession(workspaces, target) === args.sessionId) throw new BindingError('session-conflict')
+            const row = {...table[key], sessionId: args.sessionId, relay: args.relay}
+            delete row.workspacePath
+            table[key] = row
+          } else if (mode === 'unbind') delete table[key]
+          else {
+            if (!table[key]) throw new BindingError('not-found')
+            table[key] = {...table[key], relay: args.relay}
+          }
+          // Inbound admissions wait on task; tool/scheduler sends may start while
+          // validation awaits, so recheck immediately before returning to publish.
+          if (inboundAdmissions || outgoingChats.size || inboundTriggers.size || pendingRelays.size) throw new BindingError('busy')
+        }, async publish => {
+          const ids = [...affected]
+          const reserve = async (index: number): Promise<Awaited<ReturnType<typeof publish>>> => {
+            if (index === ids.length) return publish()
+            const live = agents?.get(ids[index])
+            if (!live) return reserve(index + 1)
+            if (live.status !== 'idle' || typeof live.runMaintenance !== 'function') throw new BindingError('busy')
+            try { return await live.runMaintenance(() => reserve(index + 1)) }
+            catch (error) { if (error instanceof BindingError) throw error; throw new BindingError('busy') }
+          }
+          return reserve(0)
+        })
+        state.bindings = snapshot.bindings
+        return bindingView()
+      })()
+      bindingMutation = task
+      void task.finally(() => { if (bindingMutation === task) bindingMutation = undefined }).catch(() => {})
+      return task
     }
 
     // ================= webhook: self-registration with BlueBubbles =================
@@ -588,6 +679,11 @@ export default {
       const sender: string | null = (m.handle && m.handle.address) || null
       const chatName: string = chat ? (chat.displayName || '') : ''
 
+      // Acquire an admission before any async resume/quote/attachment work.
+      // Management sets its promise synchronously; admissions then wait for publication.
+      if (bindingMutation) await bindingMutation.catch(() => {})
+      inboundAdmissions += 1
+      try {
       // hot re-read of bindings/contacts before every message (the CLI may have just edited them)
       await reloadStateFiles(false)
 
@@ -659,12 +755,13 @@ export default {
       if (sendUserMessage(agents, sessionId, line, 'dsh-bluebubbles', 'next-step')) {
         // register the iMessage-triggered turn: typing indicator (default on) and reply auto-delivery (when relay: true)
         if (chatGuid) {
-          await setTrigger(sessionId, chatGuid, binding.relay === true, binding.typing !== false)
+          await setTrigger(sessionId, chatGuid, binding.relay === true, binding.typing !== false, true)
           if (binding.typing !== false) void sendTyping(chatGuid)
         }
         await dbg('delivered session=' + sessionId)
         console.log('bb: message delivered to session ' + sessionId + ' (' + (chatName || sender || chatGuid) + ')')
       }
+      } finally { inboundAdmissions -= 1 }
     }
 
     // ================= iMessage-triggered turn ergonomics (typing indicator + reply auto-delivery) =================
@@ -678,7 +775,8 @@ export default {
     // rebuilds the plugin instance mid-turn; a purely in-memory table would lose
     // triggers and silently produce "inbound arrived, reply never relayed".
     // setAt + TTL prevent an ancient trigger from resurrecting into a new turn.
-    type RelayTrigger = { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number; setAt: number }
+    type RelayTrigger = { chatGuid: string; relay: boolean; typing: boolean; lastTypingAt: number; setAt: number; bindingRequired?: boolean; generation?: number }
+    const relayGenerations = new Map<string, number>()
     const RELAY_TRIGGER_TTL_MS = 10 * 60 * 1000
     const inboundTriggers = new Map<string, RelayTrigger>()
 
@@ -702,30 +800,40 @@ export default {
       const now = Date.now()
       let loaded = 0
       for (const [sessionId, value] of Object.entries(raw)) {
+        // Startup observation may finish after a real inbound has armed a new
+        // trigger. Never replace that live ownership with the disk snapshot.
+        if (inboundTriggers.has(sessionId)) continue
         if (!value || typeof value !== 'object') continue
         const t = value as Partial<RelayTrigger>
         if (typeof t.chatGuid !== 'string') continue
         if (typeof t.setAt !== 'number' || now - t.setAt > RELAY_TRIGGER_TTL_MS) continue // expired triggers are dropped outright
         inboundTriggers.set(sessionId, {
+          bindingRequired: t.bindingRequired !== false,
+          generation: (relayGenerations.get(sessionId) || 0) + 1,
           chatGuid: t.chatGuid,
           relay: t.relay !== false,
           typing: t.typing !== false,
           lastTypingAt: 0,
           setAt: t.setAt,
         })
+        relayGenerations.set(sessionId, inboundTriggers.get(sessionId)!.generation!)
         loaded += 1
       }
       if (loaded > 0) void dbg('relay triggers loaded=' + loaded)
     }
 
-    async function setTrigger(sessionId: string, chatGuid: string, relay: boolean, typing: boolean): Promise<void> {
+    async function setTrigger(sessionId: string, chatGuid: string, relay: boolean, typing: boolean, bindingRequired = false): Promise<void> {
+      if (bindingMutation) await bindingMutation.catch(() => {})
       inboundTriggers.set(sessionId, {
+        bindingRequired,
+        generation: (relayGenerations.get(sessionId) || 0) + 1,
         chatGuid,
         relay,
         typing,
         lastTypingAt: 0,
         setAt: Date.now(),
       })
+      relayGenerations.set(sessionId, inboundTriggers.get(sessionId)!.generation!)
       await persistTriggers()
     }
 
@@ -782,7 +890,27 @@ export default {
             return
           }
           // every assistant message with text ships immediately (thinking/tool results already filtered by assistantTextOf)
-          void sendText({ chatGuid: trigger.chatGuid, text }).then((r) => dbg('relay ' + (r.ok ? 'ok' : 'FAIL ' + JSON.stringify(r).slice(0, 120))))
+          const send = async () => {
+            // A newer trigger must not redirect an already queued assistant event.
+            if (trigger.generation !== undefined && relayGenerations.get(sessionId) !== trigger.generation) return
+            const dispatch = async () => {
+              if (trigger.generation !== undefined && relayGenerations.get(sessionId) !== trigger.generation) return
+              const r = await sendText({chatGuid: trigger.chatGuid, text})
+              await dbg('relay ' + (r.ok ? 'ok' : 'FAIL'))
+            }
+            if (trigger.bindingRequired === false) return dispatch() // Explicit scheduler armRelay owns its chat authorization.
+            await withBindingsLock(state.bindingsPath, async snapshot => {
+              const current = snapshot.bindings['chat:' + trigger.chatGuid]
+              if (!current || current.relay !== true || await resolveSession(workspaces, current) !== sessionId) return
+              await dispatch()
+            }, RELAY_LOCK_WAIT_MS)
+          }
+          const job = relayDispatchTail.then(send, send).catch(error => dbg(error?.code === 'lock-timeout'
+            ? 'relay suppressed: binding lock deadline; not sent'
+            : 'relay suppressed: binding changed or store unavailable'))
+          relayDispatchTail = job
+          pendingRelays.add(job)
+          void job.finally(() => pendingRelays.delete(job)).catch(() => {})
           return
         }
         if (event.type === 'turn/end') {
@@ -1008,12 +1136,40 @@ export default {
       sendText: (args: Record<string, unknown>) => sendText(args || {}),
       sendAttachment: (args: Record<string, unknown>) => sendAttachment(args || {}),
       getAttachment: (args: { guid: string; name?: string }) => downloadAttachment(args.guid, args.name || 'attachment'),
-      bind: (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
+      bind: async (args: { chatGuid: string; workspacePath?: string; sessionId?: string }) => {
+        if (bindingMutation || inboundAdmissions || outgoingChats.size || inboundTriggers.size || pendingRelays.size) throw new BindingError('busy')
         const binding: Binding = args.sessionId ? { sessionId: args.sessionId } : { workspacePath: args.workspacePath }
-        state.bindings['chat:' + args.chatGuid] = binding
-        return saveBindings()
+        const task = updateBindings(state.bindingsPath, undefined, table => {
+          const retained = {...table['chat:' + args.chatGuid]}
+          for (const key of ['sessionId', 'workspacePath', 'relay', 'typing']) delete retained[key]
+          table['chat:' + args.chatGuid] = {...retained, ...binding}
+        })
+        bindingMutation = task
+        try { state.bindings = (await task).bindings } finally { if (bindingMutation === task) bindingMutation = undefined }
       },
       listBindings: () => state.bindings,
+      whenRelayIdle: () => Promise.allSettled([...pendingRelays]),
+      bindingManagement: {
+        list: bindingView,
+        sessions: async () => {
+          const catalog = getService<{list(request: Record<string, never>, signal: AbortSignal): Promise<{items: ReadonlyArray<{sessionId: string; cwd?: string; origin?: string; running: boolean; agentAvailable: boolean}>}>}>(ctx, 'sessionController')
+          if (catalog) return {sessions: (await catalog.list({}, new AbortController().signal)).items.map(row => ({id: row.sessionId, cwd: row.cwd ?? '', available: row.origin !== 'subagent', status: row.running ? 'running' : row.agentAvailable ? 'idle' : 'cold'}))}
+          const persistence = getService<SessionPersistenceService>(ctx, 'sessionPersistence')
+          if (!persistence) throw new BindingError('not-found')
+          return {sessions: (await persistence.list()).map(row => ({id: row.header?.id ?? row.id, status: 'unverified'})).filter(row => typeof row.id === 'string')}
+        },
+        chats: async (args: {limit?: number; offset?: number} = {}) => {
+          const limit = args.limit ?? 50, offset = args.offset ?? 0
+          const result = await curl('POST', 'chat/query', {limit, offset, with: ['participants']})
+          if (!result.ok) throw new BindingError('chat-unavailable')
+          const rows = Array.isArray(result.data) ? result.data : []
+          const chats = rows.filter(row => typeof row?.guid === 'string').map(row => ({guid: row.guid, title: typeof row.displayName === 'string' ? row.displayName : '', participants: (Array.isArray(row.participants) ? row.participants : []).map((p: any) => typeof p.displayName === 'string' ? p.displayName : typeof p.address === 'string' ? p.address : '').filter(Boolean)}))
+          return {chats, hasMore: rows.length === limit, nextOffset: offset + rows.length}
+        },
+        bind: (args: {chatGuid: string; sessionId: string; relay: boolean; expectedRevision: string}) => mutateBinding(args, 'bind'),
+        unbind: (args: {chatGuid: string; expectedRevision: string}) => mutateBinding(args, 'unbind'),
+        updateRelay: (args: {chatGuid: string; relay: boolean; expectedRevision: string}) => mutateBinding(args, 'relay'),
+      },
       // Lets dsh-cron and friends reuse the inbound relay mechanism: register a
       // "deliver replies to chatGuid" trigger for a session. Semantics identical
       // to iMessage-inbound turns (per-message text delivery, NO_REPLY

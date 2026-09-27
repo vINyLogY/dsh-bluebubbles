@@ -1,0 +1,6 @@
+# Opt-in target-only bundle. The bridge must already be installed/enabled.
+- insert:
+    - id: bluebubbles-bindings-management
+      name: dsh-bluebubbles/bindings-management
+    - id: imessage-bindings-settings
+      name: '@vinylogy/dsh-client-imessage-bindings'
