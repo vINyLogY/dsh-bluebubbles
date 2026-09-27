@@ -29,6 +29,16 @@ for(const protectedPath of[snapshotPhysical,await fs.realpath(runtime),...(candi
 await assert.rejects(fs.lstat(outputPhysical),{code:'ENOENT'},'Output must be absent')
 await fs.mkdir(output,{mode:0o700})
 const home=path.join(output,'home');await fs.cp(snapshot,home,{recursive:true,preserveTimestamps:true,verbatimSymlinks:true});await fs.chmod(home,0o700)
+// Fence every preparation sink too: preserved internal links are untrusted.
+const originalRealpathSync=nodeFs.realpathSync,writeRoot=originalRealpathSync(output)
+let deniedExternalWrites=0;const privateDeniedWrites=[]
+function confined(value){if(typeof value==='number')throw Error('UNOWNED_FILE_DESCRIPTOR_WRITE');const p=path.resolve(value instanceof URL?new URL(value).pathname:String(value));let ancestor=p;while(!nodeFs.existsSync(ancestor)){const parent=path.dirname(ancestor);if(parent===ancestor)break;ancestor=parent}const physical=path.resolve(originalRealpathSync(ancestor),path.relative(ancestor,p));if(physical!==writeRoot&&!physical.startsWith(writeRoot+'/')){deniedExternalWrites++;privateDeniedWrites.push({path:physical,stack:new Error().stack});throw Error('OFFLINE_EXTERNAL_WRITE_DENIED')}}
+const indices={writeFile:[0],appendFile:[0],mkdir:[0],rm:[0],rmdir:[0],unlink:[0],chmod:[0],chown:[0],truncate:[0],utimes:[0],rename:[0,1],copyFile:[1],cp:[1],symlink:[1],link:[1]}
+for(const[name,args]of Object.entries(indices)){if(typeof fs[name]==='function'){const original=fs[name].bind(fs);fs[name]=(...values)=>{for(const index of args)confined(values[index]);return original(...values)}}for(const method of[name,name+'Sync'])if(typeof nodeFs[method]==='function'){const original=nodeFs[method].bind(nodeFs);nodeFs[method]=(...values)=>{for(const index of args)confined(values[index]);return original(...values)}}}
+const writeFlags=nodeFs.constants.O_WRONLY|nodeFs.constants.O_RDWR|nodeFs.constants.O_CREAT|nodeFs.constants.O_TRUNC|nodeFs.constants.O_APPEND
+for(const target of[fs,nodeFs]){const original=target.open.bind(target);target.open=(...values)=>{const flags=values[1]??'r';if(typeof flags==='number'?(flags&writeFlags)!==0:/[wa+]/.test(flags))confined(values[0]);return original(...values)}}
+const originalOpenSync=nodeFs.openSync.bind(nodeFs);nodeFs.openSync=(...values)=>{const flags=values[1]??'r';if(typeof flags==='number'?(flags&writeFlags)!==0:/[wa+]/.test(flags))confined(values[0]);return originalOpenSync(...values)}
+syncBuiltinESMExports()
 try{await fs.rename(home+'/.env',home+'/.env.offline-preserved')}catch(e){if(e.code!=='ENOENT')throw e}
 await fs.writeFile(home+'/heartbeat-targets.json','{}',{mode:0o600});await fs.writeFile(home+'/cron-jobs.json','{"jobs":{}}',{mode:0o600})
 const bindings=Object.values(JSON.parse(await fs.readFile(snapshot+'/bluebubbles-bindings.json'))),heartbeat=Object.values(JSON.parse(await fs.readFile(snapshot+'/heartbeat-targets.json')))[0],workspaces=JSON.parse(await fs.readFile(snapshot+'/storages/workspace.json')).tables.workspaces
@@ -66,17 +76,6 @@ if(candidateEngine){
  await fs.writeFile(output+'/composition-plan-private.json',JSON.stringify({original:rows,candidate:changed,originalBaseUrl:pathToFileURL(originalFile).href}),{mode:0o600})
 }
 await fs.writeFile(home+'/profiles/web/cordis.patch.yml','- insert:\n    - id: offline-shell-fence\n      name: '+home+'/offline-shell-fence.mjs\n'+candidatePrefix+originalProfile+'\n- id: hmr\n  disabled: true\n',{mode:0o600})
-// Restored Session.cwd remains authentic. A preset must not be able to write
-// that production workspace or a host-runtime directory during cold setup.
-const originalRealpathSync=nodeFs.realpathSync,writeRoot=originalRealpathSync(output)
-let deniedExternalWrites=0;const privateDeniedWrites=[]
-function confined(value){if(typeof value==='number')throw Error('UNOWNED_FILE_DESCRIPTOR_WRITE');const p=path.resolve(value instanceof URL?new URL(value).pathname:String(value));let ancestor=p;while(!nodeFs.existsSync(ancestor)){const parent=path.dirname(ancestor);if(parent===ancestor)break;ancestor=parent}const physical=path.resolve(originalRealpathSync(ancestor),path.relative(ancestor,p));if(physical!==writeRoot&&!physical.startsWith(writeRoot+'/')){deniedExternalWrites++;privateDeniedWrites.push({path:physical,stack:new Error().stack});throw Error('OFFLINE_EXTERNAL_WRITE_DENIED')}}
-const indices={writeFile:[0],appendFile:[0],mkdir:[0],rm:[0],rmdir:[0],unlink:[0],chmod:[0],chown:[0],truncate:[0],utimes:[0],rename:[0,1],copyFile:[1],cp:[1],symlink:[1],link:[1]}
-for(const[name,args]of Object.entries(indices)){if(typeof fs[name]==='function'){const original=fs[name].bind(fs);fs[name]=(...values)=>{for(const index of args)confined(values[index]);return original(...values)}}for(const method of[name,name+'Sync'])if(typeof nodeFs[method]==='function'){const original=nodeFs[method].bind(nodeFs);nodeFs[method]=(...values)=>{for(const index of args)confined(values[index]);return original(...values)}}}
-const writeFlags=nodeFs.constants.O_WRONLY|nodeFs.constants.O_RDWR|nodeFs.constants.O_CREAT|nodeFs.constants.O_TRUNC|nodeFs.constants.O_APPEND
-for(const target of[fs,nodeFs]){const original=target.open.bind(target);target.open=(...values)=>{const flags=values[1]??'r';if(typeof flags==='number'?(flags&writeFlags)!==0:/[wa+]/.test(flags))confined(values[0]);return original(...values)}}
-const originalOpenSync=nodeFs.openSync.bind(nodeFs);nodeFs.openSync=(...values)=>{const flags=values[1]??'r';if(typeof flags==='number'?(flags&writeFlags)!==0:/[wa+]/.test(flags))confined(values[0]);return originalOpenSync(...values)}
-syncBuiltinESMExports()
 const {runProfile}=await import(pathToFileURL(require.resolve('@deepseek-ai/dsh/lib/profile-boot.js'))),{createLaunchEnvironmentSnapshot}=await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-launch-environment'))),{Session}=await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-session')))
 const digest=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex'),logs=[],normal=Object.fromEntries(['log','warn','error','info','debug'].map(k=>[k,console[k]]));for(const k of Object.keys(normal))console[k]=(...args)=>logs.push(args.map(String).join(' '))
 let boot,failed=false;const handles=[],ptcOutcomes=[]
