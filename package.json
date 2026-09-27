@@ -17,6 +17,7 @@
     "test:runtime": "node --test test/runtime/integration.mjs",
     "test:chat-compat": "node --test compat/chat-completions/test/*.test.mjs",
     "test:chat-compat-profile": "node compat/chat-completions/test/profile-integration.mjs",
+    "test:workflow-compat-pure": "node --check compat/legacy-workflow/src/index.mjs && node --check compat/legacy-workflow/src/engine.mjs && node --check compat/legacy-workflow/src/transport.mjs && node --check compat/legacy-workflow/src/protocol.mjs && node --check compat/legacy-workflow/src/worker.cjs && node --test compat/legacy-workflow/test/protocol.test.mjs compat/legacy-workflow/test/transport.test.mjs",
     "test:integration": "node test/integration.mjs"
   },
   "peerDependencies": {
