@@ -1,7 +1,7 @@
 # Pinned runtime tests
 
-The two fixture manifests and lockfiles keep the deployed DSH 0.1.1 cohort
-separate from DSH 0.1.7-rc.2. They do not replace the plugin's development
+The fixture manifests and lockfiles keep the DSH 0.1.1, 0.1.7-rc.2, and
+0.2.1-rc.2 (`current`) cohorts separate. They do not replace the plugin's development
 dependencies or upgrade an installed server.
 
 The legacy fixture pins CLI 0.1.1-rc.1, the 0.1.1-rc.2 agent and persistence
@@ -10,6 +10,10 @@ contracts, and the deployed shell/Cordis interfaces. Install it with
 explicit dependencies. The next fixture pins CLI 0.1.7-rc.2 and its runtime
 contracts. Its lock uses normal peer resolution; install it with
 `npm ci --ignore-scripts`.
+
+The current fixture uses normal peer resolution as well. Its runtime tests
+also exercise scheduler activation and teardown, the authenticated bindings
+gateway, and the official browser module loader and settings slot renderer.
 
 CI installs one fixture into a fresh directory and links only its
 `node_modules` into the real source checkout. The source files are not

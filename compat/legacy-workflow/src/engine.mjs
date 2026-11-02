@@ -425,7 +425,7 @@ var WorkerRun = class {
 				if (this.cancelReason === void 0) this.observer.log(message.message);
 				break;
 			case WorkerToHostType.AgentStart:
-				if (this.seenAgentSeq.has(message.info.seq) || message.info.seq > this.limits.maxTotalAgents || ![...this.children.values()].some(record => record.run.id === message.info.childId)) {
+				if (this.seenAgentSeq.has(message.info.seq) || message.info.seq > this.limits.maxTotalAgents || ![...this.children.values()].some(record => record.childId === message.info.childId)) {
 					this.onWorkerDeath("uncorrelated workflow agent-start frame", false); return;
 				}
 				this.seenAgentSeq.set(message.info.seq, message.info);
@@ -499,19 +499,36 @@ var WorkerRun = class {
 	async startChild(callId, request) {
 		let run;
 		try {
-			run = await this.subagents.start(this.provider, {
+			const childRequest = {
 				prompt: [{
 					type: "text",
 					text: request.prompt
 				}],
 				parent: this.parent,
-				signal: this.controller.signal,
 				...request.schema !== void 0 ? { outputSchema: request.schema } : {},
 				...request.provider !== void 0 || request.model !== void 0 ? { agentOptions: {
 					...request.provider !== void 0 ? { provider: request.provider } : {},
 					...request.model !== void 0 ? { model: request.model } : {}
 				} } : {}
-			});
+			};
+			if (typeof this.subagents.startActivation === "function") {
+				// DSH 0.2 owns children through its activation manager. Preserve its
+				// exact-live-parent and capability admission; caller delivery keeps
+				// the legacy workflow's result handling from notifying twice.
+				run = await this.subagents.startActivation({
+					provider: this.provider,
+					label: `${this.meta.name} child ${callId}`,
+					delivery: "caller",
+					signal: this.controller.signal,
+					request: {
+						...childRequest,
+						cwd: await this.ctx.workingDirectory.ensure(this.parent, this.controller.signal)
+					}
+				});
+			} else {
+				// DSH 0.1.7's public provider-start seam owns the returned run.
+				run = await this.subagents.start(this.provider, { ...childRequest, signal: this.controller.signal });
+			}
 		} catch (error) {
 			const failure = this.childAdmissionFailure();
 			this.post(HostToWorkerType.ChildStartError, {
@@ -535,7 +552,7 @@ var WorkerRun = class {
 			}
 			return;
 		}
-		const record = { run };
+		const record = { run, childId: run.childId ?? run.id };
 		this.children.set(callId, record);
 		const forwardResult = run.result.then((result) => {
 			try {
@@ -571,7 +588,7 @@ var WorkerRun = class {
 		});
 		this.post(HostToWorkerType.ChildStarted, {
 			callId,
-			childId: run.id
+			childId: record.childId
 		});
 		forwardResult.then((forward) => {
 			forward();

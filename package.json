@@ -23,7 +23,7 @@
     "test:integration": "node test/integration.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": "0.1.1-rc.1 || 0.1.1-rc.2 || 0.1.7-rc.2"
+    "@deepseek-ai/dsh": "0.1.1-rc.1 || 0.1.1-rc.2 || 0.1.7-rc.2 || 0.2.1-rc.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": { "optional": true }

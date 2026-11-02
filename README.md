@@ -208,6 +208,16 @@ the write outcome is **unknown**: refresh first; do not assume it failed or retr
 the mutation automatically. Failed saves never report success or pre-update the
 bridge's active map. CLI updates still hot-apply on the next inbound message.
 
+## DSH 0.2.1 compatibility
+
+The bridge and optional bindings UI are verified against **0.2.1-rc.2** in the
+`current` locked runtime fixture, alongside the existing 0.1.7 and legacy fixtures.
+Heartbeat and cron declare their required Cordis services directly; deployment
+wrappers are no longer needed. The legacy workflow adapter uses managed child
+activations on 0.2.1 while retaining its 0.1.7 API path. Session v4 producers,
+model selection, relay guards and the optional Chat Completions adapter retain
+their behavior. Native workflow controls pass on both 0.1.7 and 0.2.1.
+
 ## Updating the code
 
 1. Edit `src/*.ts` → `npm run typecheck` → `git commit`

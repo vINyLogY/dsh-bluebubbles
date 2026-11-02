@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cohort: [legacy, next]
+        cohort: [legacy, next, current]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,10 +53,10 @@ jobs:
       - run: npm test
       - run: npm run test:runtime
       - name: Check target-only legacy workflow syntax and closed transport contracts
-        if: matrix.cohort == 'next'
+        if: matrix.cohort != 'legacy'
         run: npm run test:workflow-compat-pure
       - name: Build and test optional authenticated binding UI
-        if: matrix.cohort == 'next'
+        if: matrix.cohort != 'legacy'
         shell: bash
         run: |
           npm ci --prefix client/bindings-ui --ignore-scripts

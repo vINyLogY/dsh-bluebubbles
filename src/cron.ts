@@ -83,10 +83,7 @@ function nextRunAfter(match: ScheduleMatch, from: Date, capDays = 730): Date | n
 }
 
 export default {
-  inject: {
-    required: ['timer', 'shell'],
-    optional: ['fs'],
-  },
+  inject: ['timer', 'shell', 'fs', 'agents', 'workspaceRegistry'],
   apply(ctx: Context) {
     const timer = (ctx as unknown as { timer: TimerService }).timer
     const fs = getService<FsService>(ctx, 'fs')

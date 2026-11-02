@@ -1,0 +1,14 @@
+{
+  "name": "dsh-bluebubbles-current-runtime-tests",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subagent-codex": "0.2.1-rc.2",
+    "@deepseek-ai/node-addon-system": "0.1.2",
+    "@types/node": "^26.0.0",
+    "typescript": "^5.9.0"
+  }
+}

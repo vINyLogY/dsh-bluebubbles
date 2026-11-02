@@ -18,10 +18,7 @@ interface HeartbeatTarget extends SessionTarget {
 const DEFAULT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
 export default {
-  inject: {
-    required: ['timer', 'shell'],
-    optional: ['fs'],
-  },
+  inject: ['timer', 'shell', 'fs', 'agents', 'workspaceRegistry'],
   apply(ctx: Context) {
     const timer = (ctx as unknown as { timer: TimerService }).timer
     const fs = getService<FsService>(ctx, 'fs')
