@@ -16,7 +16,7 @@ import { BindingError, readBindings, updateBindings, withBindingsLock } from './
 // Only pre-send lock contention may wait; a started transport is never retried.
 export const RELAY_LOCK_WAIT_MS = 1000
 
-import { ensureLiveAgent, getService, inspectSession, pickEnvValue, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
+import { ensureLiveAgent, getService, inspectSession, pickEnvValue, pickReplyTargetOverride, readEnvFiles, resolveSession, sendUserMessage, runShell } from './lib.ts'
 import type { SessionPersistenceService, AgentPresetsService } from './lib.ts'
 import type { AgentsService, FsService, WorkspaceRegistryService } from './lib.ts'
 
@@ -56,6 +56,7 @@ export default {
       contacts: {} as Record<string, string>,
       contactsPath: (process.env.BLUEBUBBLES_CONTACTS || dshHome + '/bluebubbles-contacts.json') as string,
       relayStatePath: (process.env.BLUEBUBBLES_RELAY_STATE || dshHome + '/bluebubbles-relay-state.json') as string,
+      replyTargetPath: (process.env.BLUEBUBBLES_REPLY_TARGET || dshHome + '/bluebubbles-reply-target.json') as string,
     }
 
     // ================= HTTP helpers (curl via the shell service: the host web service only accepts GET) =================
@@ -780,6 +781,32 @@ export default {
     const RELAY_TRIGGER_TTL_MS = 10 * 60 * 1000
     const inboundTriggers = new Map<string, RelayTrigger>()
 
+    // Per-turn reply target override (bb-channel set-reply-target). The relay
+    // hot-reads the file before delivering so this turn can answer another chat
+    // or stay silent; an override only applies to the turn that armed the
+    // trigger (its setAt) and expires with the trigger TTL.
+    type ReplyTarget = { kind: 'chat'; chatGuid: string } | { kind: 'none' }
+
+    async function replyTargetFor(sessionId: string, trigger: RelayTrigger): Promise<ReplyTarget> {
+      const table = await readJsonFile(state.replyTargetPath)
+      const picked = pickReplyTargetOverride(table, sessionId, trigger.setAt, Date.now(), RELAY_TRIGGER_TTL_MS)
+      if (!picked) return { kind: 'chat', chatGuid: trigger.chatGuid }
+      return picked
+    }
+
+    async function sendTypingFor(sessionId: string, trigger: RelayTrigger): Promise<void> {
+      try {
+        const target = await replyTargetFor(sessionId, trigger)
+        if (target.kind === 'none') {
+          await dbg('typing suppressed: reply target none session=' + sessionId)
+          return
+        }
+        await sendTyping(target.chatGuid)
+      } catch {
+        // typing is decoration; never break the turn
+      }
+    }
+
     async function persistTriggers(): Promise<void> {
       if (!fs) return
       try {
@@ -877,7 +904,7 @@ export default {
           const now = Date.now()
           if (now - trigger.lastTypingAt < 8000) return // the indicator expires server-side; re-arm throttled to 8s
           trigger.lastTypingAt = now
-          void sendTyping(trigger.chatGuid)
+          void sendTypingFor(sessionId, trigger)
           return
         }
         if (event.type === 'assistant/message' && trigger.relay) {
@@ -893,16 +920,33 @@ export default {
           const send = async () => {
             // A newer trigger must not redirect an already queued assistant event.
             if (trigger.generation !== undefined && relayGenerations.get(sessionId) !== trigger.generation) return
+            const target = await replyTargetFor(sessionId, trigger)
+            if (target.kind === 'none') {
+              await dbg('relay suppressed: reply target none session=' + sessionId)
+              return
+            }
+            const targetChatGuid = target.chatGuid
             const dispatch = async () => {
               if (trigger.generation !== undefined && relayGenerations.get(sessionId) !== trigger.generation) return
-              const r = await sendText({chatGuid: trigger.chatGuid, text})
-              await dbg('relay ' + (r.ok ? 'ok' : 'FAIL'))
+              const r = await sendText({chatGuid: targetChatGuid, text})
+              await dbg('relay ' + (r.ok ? 'ok' : 'FAIL') + (targetChatGuid === trigger.chatGuid ? '' : ' (reply target override → ' + targetChatGuid + ')'))
             }
             if (trigger.bindingRequired === false) return dispatch() // Explicit scheduler armRelay owns its chat authorization.
             await withBindingsLock(state.bindingsPath, async snapshot => {
-              const current = snapshot.bindings['chat:' + trigger.chatGuid]
-              if (!current || current.relay !== true || await resolveSession(workspaces, current) !== sessionId) return
-              await dispatch()
+              if (targetChatGuid === trigger.chatGuid) {
+                const current = snapshot.bindings['chat:' + trigger.chatGuid]
+                if (!current || current.relay !== true || await resolveSession(workspaces, current) !== sessionId) return
+                return dispatch()
+              }
+              // Explicit redirect: an unbound destination is allowed (same reach
+              // as bb-channel send), but a chat bound to another session is not
+              // hijacked by a stale override.
+              const destination = snapshot.bindings['chat:' + targetChatGuid]
+              if (destination && await resolveSession(workspaces, destination) !== sessionId) {
+                await dbg('relay suppressed: reply target bound to another session')
+                return
+              }
+              return dispatch()
             }, RELAY_LOCK_WAIT_MS)
           }
           const job = relayDispatchTail.then(send, send).catch(error => dbg(error?.code === 'lock-timeout'
