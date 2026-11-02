@@ -35,6 +35,9 @@ interface StoredSession {
     type?: string
     data?: {
       agentPreset?: string
+      provider?: string
+      model?: string
+      reasoningEffort?: string
       header?: {
         config?: { provider?: string; model?: string; reasoningEffort?: string; maxTokens?: number }
         adapterDefaults?: { reasoningEffort?: true }
@@ -206,7 +209,7 @@ export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined,
       // chat-driven session, so the web attach path's session-local selection
       // never runs: without this the resumed agent answers every turn with
       // "has no provider/model". Prefer the session's own last request
-      // selection so the established request prefix (and KV cache) survives,
+      // selection, honoring an unconsumed model/selection event from the UI,
       // then fall back to the deployment default from settings.
       let provider: string | undefined
       let model: string | undefined
@@ -222,6 +225,24 @@ export function ensureLiveAgent(ctx: Context, agents: AgentsService | undefined,
           if (typeof config.maxTokens === 'number' && Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0) maxTokens = config.maxTokens
           break
         }
+      }
+      // A UI selection is durable before the first request using it. An older
+      // in-flight request may finish afterward; only a matching request header
+      // consumes the selection (the same rule as DSH's modelSelection projection).
+      let pending: { provider: string; model: string; reasoningEffort?: string } | undefined
+      for (const event of inspected.events) {
+        const selected = event.type === 'model/selection' ? event.data : undefined
+        if (typeof selected?.provider === 'string' && selected.provider.trim() !== '' && typeof selected.model === 'string' && selected.model.trim() !== '') {
+          pending = { provider: selected.provider, model: selected.model, ...selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort } }
+        }
+        const used = event.type === 'request/header' ? event.data?.header?.config : undefined
+        if (pending && used?.provider === pending.provider && used.model === pending.model && used.reasoningEffort === pending.reasoningEffort) pending = undefined
+      }
+      if (pending) {
+        if (provider !== pending.provider || model !== pending.model) maxTokens = undefined
+        provider = pending.provider
+        model = pending.model
+        reasoningEffort = pending.reasoningEffort
       }
       if (!provider || !model) {
         const fallback = getService<AgentDefaultModelService>(ctx, 'agentDefaultModel')?.currentSelection?.()
@@ -306,4 +327,35 @@ export function sendUserMessage(
   } as unknown as UserMessage
   agent.send(message, target, true)
   return true
+}
+
+// ================= per-turn reply target override =================
+// bb-channel `set-reply-target` writes $DSH_HOME/bluebubbles-reply-target.json;
+// the relay hot-reads it before every delivery so a turn can redirect its
+// automatic iMessage reply (another chat, or silence) instead of always
+// answering the chat that woke it. Pure so it can be unit-tested without a host.
+export type ReplyTargetOverride = { kind: 'chat'; chatGuid: string } | { kind: 'none' }
+
+/** Resolve the override that belongs to the turn that armed `triggerSetAt`.
+ *  An entry older than the trigger belongs to a previous turn and is ignored;
+ *  entries expire with the relay trigger TTL. Malformed rows are ignored. */
+export function pickReplyTargetOverride(
+  table: Record<string, unknown> | null,
+  sessionId: string,
+  triggerSetAt: number,
+  now: number,
+  ttlMs: number,
+): ReplyTargetOverride | null {
+  if (!table || typeof table !== 'object') return null
+  const row = table[sessionId]
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null
+  const entry = row as { kind?: unknown; chatGuid?: unknown; setAt?: unknown }
+  if (typeof entry.setAt !== 'number' || !Number.isFinite(entry.setAt)) return null
+  if (entry.setAt < triggerSetAt) return null // armed by an older turn: never redirect this one
+  if (now - entry.setAt > ttlMs) return null // expired with the relay trigger
+  if (entry.kind === 'none') return { kind: 'none' }
+  if (entry.kind === 'chat' && typeof entry.chatGuid === 'string' && entry.chatGuid !== '') {
+    return { kind: 'chat', chatGuid: entry.chatGuid }
+  }
+  return null
 }

@@ -55,7 +55,7 @@ async function wires(oldMessages, newMessages = oldMessages, extra = {}, adapter
   return calls
 }
 test('adapter source resolves exclusively target core', async () => {
-  assert.equal(core.version, '0.1.7-rc.2')
+  assert.ok(['0.1.7-rc.2', '0.2.1-rc.2'].includes(core.version))
   assert.notEqual(await realpath(dirname(corePath)), await realpath(resolve(legacyModules, '@deepseek-ai/dsh-llm')))
   assert.ok(new ChatCompletionsCompatAdapter({ options: () => config, resolveApiKey: async () => 'x', resolveUserId: () => 'u' }) instanceof target.LlmAdapter)
   console.log(JSON.stringify({ sourceRoot: root, targetCoreVersion: core.version, targetCoreRealPath: await realpath(corePath), legacyOracleVersion: JSON.parse(await readFile(resolve(legacyModules, '@deepseek-ai/dsh-llm-deepseek/package.json'), 'utf8')).version }))

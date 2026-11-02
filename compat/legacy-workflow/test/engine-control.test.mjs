@@ -23,11 +23,11 @@ test('real public Node PTC sandbox runner executes unchanged legacy guest and di
  Object.assign(process.env,{HOME:root,DSH_HOME:root})
  const ctx=new Context(),fibers=[],events=[]
  try{
-  for(const name of ['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node']){const m=await importSdk(name),config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:5000,maxTimeoutMs:10000,graceMs:500}:undefined;const f=ctx.plugin(m.default,config);fibers.push(f);await f}
+  for(const name of ['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node']){const m=await importSdk(name),config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:5000,maxTimeoutMs:10000,graceMs:500}:undefined;if(name==='dsh-subagent'&&m.default.inject?.includes('workingDirectory')){const prompt=await importSdk('dsh-system-prompt');const p=ctx.plugin(prompt.default??prompt);fibers.push(p);await p;const directory=await importSdk('dsh-working-directory');const f=ctx.plugin(directory.default??directory,{defaultDirectory:root});fibers.push(f);await f}const f=ctx.plugin(m.default??m,config);fibers.push(f);await f}
   const f=ctx.plugin(NoChildProvider);fibers.push(f);await f
   const e=ctx.plugin(Engine,{provider:'synthetic',maxConcurrentAgents:1,maxTotalAgents:10,maxItemsPerCall:16,syncTimeoutMs:500,disposeGraceMs:200});fibers.push(e);await e
   assert.equal(ctx.ptcRuntime.language,'typescript');assert.equal(ctx.ptcRuntime.isolation,'process')
-  assert.equal(JSON.parse(await readFile(require.resolve('@deepseek-ai/dsh-workflow/package.json'))).version,'0.1.7-rc.2')
+  assert.ok(['0.1.7-rc.2','0.2.1-rc.2'].includes(JSON.parse(await readFile(require.resolve('@deepseek-ai/dsh-workflow/package.json'))).version))
   const id='synthetic-parent',session=Session.fromRestore(id,[{seq:0,time:0,type:'sandbox/mode',data:{mode:'read-only'}}],{type:'session',version:4,id,createdAt:0,cwd:root,delegationDepth:0,isSeeded:false,agentPreset:'standard'})
   ctx.on('workflow/start',()=>events.push('start'));ctx.on('workflow/end',()=>events.push('end'))
   const run=ctx.workflowEngine.start({script:'return {answer: args.value + 1}',meta:{name:'synthetic-control',description:'synthetic'},args:{value:41},parent:{id,session}})
@@ -69,7 +69,7 @@ test('actual legacy guest is confined, scrubbed and subject to finite runtime/ou
  await writeFile(target,'unchanged');await writeFile(inside,'unchanged')
  const keys=['DEEPSEEK_API_KEY','BLUEBUBBLES_PASSWORD','BROWSER_TOKEN','SYNTHETIC_NON_CREDENTIAL'];for(const key of keys)process.env[key]='synthetic-not-secret'
  try{
-  for(const name of ['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node']){const m=await importSdk(name),config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:500,maxTimeoutMs:1000,graceMs:100}:undefined;const f=ctx.plugin(m.default,config);fibers.push(f);await f}
+  for(const name of ['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node']){const m=await importSdk(name),config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:500,maxTimeoutMs:1000,graceMs:100}:undefined;if(name==='dsh-subagent'&&m.default.inject?.includes('workingDirectory')){const prompt=await importSdk('dsh-system-prompt');const p=ctx.plugin(prompt.default??prompt);fibers.push(p);await p;const directory=await importSdk('dsh-working-directory');const f=ctx.plugin(directory.default??directory,{defaultDirectory:root});fibers.push(f);await f}const f=ctx.plugin(m.default??m,config);fibers.push(f);await f}
   const provider=ctx.plugin(NoChildProvider);fibers.push(provider);await provider
   const engine=ctx.plugin(Engine,{provider:'synthetic',maxConcurrentAgents:1,maxTotalAgents:10,maxItemsPerCall:16,syncTimeoutMs:200,disposeGraceMs:100,maxProtocolBytes:2048,maxProtocolEvents:20});fibers.push(engine);await engine
   const start=(mode,script,args)=>{const id='synthetic-parent',session=Session.fromRestore(id,[{seq:0,time:0,type:'sandbox/mode',data:{mode}}],{type:'session',version:4,id,createdAt:0,cwd:root,delegationDepth:0,isSeeded:false,agentPreset:'standard'});return ctx.workflowEngine.start({script,args,meta:{name:'synthetic',description:'synthetic'},parent:{id,session}})}
@@ -84,21 +84,43 @@ test('actual legacy guest is confined, scrubbed and subject to finite runtime/ou
  }finally{for(const f of fibers.reverse())await f.dispose();for(const key of keys)delete process.env[key];await rm(root,{recursive:true});await rm(outside,{recursive:true})}
 })
 test('actual public SubagentRuntime honors override capabilities and legacy progress order',{timeout:20000},async()=>{
- const root=await mkdtemp(join(tmpdir(),'dsh-legacy-workflow-sdk-')),ctx=new Context(),fibers=[]
+ const root=await mkdtemp(join(tmpdir(),'dsh-legacy-workflow-sdk-')),ctx=new Context(),fibers=[],handles=[]
+ let modelRequests=0
  try{
-  for(const name of ['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node','dsh-subagent']){const m=await importSdk(name),config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:5000,maxTimeoutMs:10000,graceMs:500}:undefined;const f=ctx.plugin(m.default,config);fibers.push(f);await f}
+  const subagents=await importSdk('dsh-subagent')
+  const managed=typeof subagents.default.prototype.startActivation==='function'
+  const names=['dsh-session','dsh-session-projection','dsh-fs-local','dsh-subprocess-local','dsh-sandbox-local','dsh-sandbox-policy','dsh-ptc-runtime-node','dsh-agent','dsh-llm','dsh-tools','dsh-system-prompt',...(managed?['dsh-working-directory']:[]),'dsh-agent-loop','dsh-subagent']
+  for(const name of names){
+   const m=await importSdk(name)
+   const config=name==='dsh-sandbox-policy'?{mode:'read-only',workspaceRoot:root}:name==='dsh-ptc-runtime-node'?{timeoutMs:5000,maxTimeoutMs:10000,graceMs:500}:name==='dsh-working-directory'?{defaultDirectory:root}:undefined
+   const f=ctx.plugin(m.default??m,config);fibers.push(f);await f
+  }
+  ctx.on('agent/request',()=>{modelRequests++;throw Error('synthetic parent must never dispatch a model')})
+  const id='synthetic-parent'
+  const handle=await ctx.agents.create({sessionId:id,meta:{cwd:root,delegationDepth:0},seed:[{seq:0,time:0,type:'sandbox/mode',data:{mode:'read-only'}}]})
+  handles.push(handle)
+  const parent=handle.agent
+  assert.equal(ctx.agents.get(id),parent)
+
   let calls=0,disposed=0,request
   const capabilities={agentOptions:true,outputSchema:true,depthLimit:false,toolFilter:false,persona:false}
   const provider={name:'synthetic',capabilities,start:async value=>{calls++;request=value;return{id:'synthetic-child',result:Promise.resolve({output:[{type:'text',text:'synthetic answer'}],stopReason:'completed'}),dispose:async()=>{disposed++}}}}
   ctx.subagents.registerProvider(provider)
   ctx.subagents.registerProvider({...provider,name:'unsupported',capabilities:{...capabilities,agentOptions:false}})
   const e=ctx.plugin(Engine,{provider:'synthetic',maxConcurrentAgents:1,maxTotalAgents:10,maxItemsPerCall:16,syncTimeoutMs:500,disposeGraceMs:200});fibers.push(e);await e
-  const id='synthetic-parent',session=Session.fromRestore(id,[{seq:0,time:0,type:'sandbox/mode',data:{mode:'read-only'}}],{type:'session',version:4,id,createdAt:0,cwd:root,delegationDepth:0,isSeeded:false,agentPreset:'standard'})
   const order=[];for(const name of ['workflow/start','workflow/agent-start','workflow/agent-end','workflow/end'])ctx.on(name,()=>order.push(name))
-  const run=ctx.workflowEngine.start({script:'return await agent("synthetic prompt", {provider:"synthetic-model-provider",model:"synthetic-model"})',meta:{name:'synthetic',description:'synthetic'},parent:{id,session}})
-  try{const result=await run.result;assert.equal(result.stopReason,'completed');assert.equal(result.value,'synthetic answer');assert.deepEqual(request.agentOptions,{provider:'synthetic-model-provider',model:'synthetic-model'});assert.deepEqual(order,['workflow/start','workflow/agent-start','workflow/agent-end','workflow/end'])}finally{await run.dispose()}
+  const run=ctx.workflowEngine.start({script:'return await agent("synthetic prompt", {provider:"synthetic-model-provider",model:"synthetic-model"})',meta:{name:'synthetic',description:'synthetic'},parent})
+  try{const result=await run.result;assert.equal(result.stopReason,'completed',result.error);assert.equal(result.value,'synthetic answer');assert.deepEqual(request.agentOptions,{provider:'synthetic-model-provider',model:'synthetic-model'});assert.deepEqual(order,['workflow/start','workflow/agent-start','workflow/agent-end','workflow/end'])}finally{await run.dispose()}
   assert.equal(calls,1);assert.equal(disposed,1)
-  const denied=ctx.workflowEngine.start({script:'return await agent("synthetic prompt", {model:"synthetic-model"})',subagentProvider:'unsupported',meta:{name:'synthetic',description:'synthetic'},parent:{id,session}})
+  assert.equal(request.parent,parent)
+  if(managed){
+   assert.equal(request.cwd,root)
+   assert.match(request.label,/synthetic child 1/)
+   const forged=ctx.workflowEngine.start({script:'return await agent("synthetic prompt")',meta:{name:'synthetic',description:'synthetic'},parent:{id,session:parent.session,ctx:parent.ctx}})
+   try{const result=await forged.result;assert.equal(result.stopReason,'error');assert.match(result.error,/exact live parent agent/)}finally{await forged.dispose()}
+   assert.equal(calls,1)
+  }
+  const denied=ctx.workflowEngine.start({script:'return await agent("synthetic prompt", {model:"synthetic-model"})',subagentProvider:'unsupported',meta:{name:'synthetic',description:'synthetic'},parent})
   try{const result=await denied.result;assert.equal(result.stopReason,'error');assert.match(result.error,/does not support.*agentOptions/)}finally{await denied.dispose()}
   assert.equal(calls,1)
   // Tombstone correlation permits the old legal late-end race, without double end.
@@ -108,7 +130,7 @@ test('actual public SubagentRuntime honors override capabilities and legacy prog
   const offStart=ctx.on('workflow/agent-start',(_run,value)=>{info=value;observed.resolve()})
   const offEnd=ctx.on('workflow/agent-end',()=>{endCount++})
   const offResult=ctx.on('workflow/end',()=>{endResultCount++})
-  const racing=ctx.workflowEngine.start({script:'return await agent("synthetic prompt")',subagentProvider:'pending',meta:{name:'synthetic',description:'synthetic'},parent:{id,session}})
+  const racing=ctx.workflowEngine.start({script:'return await agent("synthetic prompt")',subagentProvider:'pending',meta:{name:'synthetic',description:'synthetic'},parent})
   await observed.promise
   racing.endStrandedAgents()
   racing.onMessage({type:'agent-end',info:{...info,outcome:'cancelled'}})
@@ -118,5 +140,7 @@ test('actual public SubagentRuntime honors override capabilities and legacy prog
   await racing.dispose()
   assert.equal(cleanup,1);assert.equal(endCount,1);assert.equal(endResultCount,1)
   offStart();offEnd();offResult()
- }finally{for(const f of fibers.reverse())await f.dispose()}
+  assert.equal(modelRequests,0)
+  assert.equal(parent.inbox.nextTurn.length+parent.inbox.nextStep.length,0,'caller delivery must not enqueue duplicate parent notifications')
+ }finally{for(const handle of handles.reverse())await handle.dispose();for(const f of fibers.reverse())await f.dispose()}
 })

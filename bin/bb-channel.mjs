@@ -20,6 +20,7 @@ import { join, basename } from 'node:path'
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const BINDINGS_PATH = process.env.BLUEBUBBLES_BINDINGS || join(DSH_HOME, 'bluebubbles-bindings.json')
 const CONTACTS_PATH = process.env.BLUEBUBBLES_CONTACTS || join(DSH_HOME, 'bluebubbles-contacts.json')
+const REPLY_TARGET_PATH = process.env.BLUEBUBBLES_REPLY_TARGET || join(DSH_HOME, 'bluebubbles-reply-target.json')
 const ENV_PATH = join(DSH_HOME, '.env')
 const DEFAULT_WEBHOOK_URL = 'http://127.0.0.1:3080/bluebubbles/webhook'
 
@@ -98,6 +99,15 @@ function writeJson(path, value) {
   mkdirSync(join(path, '..'), { recursive: true })
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 }
+/** Atomic replacement for the small reply-target table (one writer per turn). */
+function writeJsonAtomic(/** @type {string} */ path, /** @type {unknown} */ value) {
+  mkdirSync(join(path, '..'), { recursive: true })
+  const temporary = path + '.tmp-' + randomUUID()
+  const file = openSync(temporary, 'wx', 0o600)
+  try { writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); fsyncSync(file) } finally { closeSync(file) }
+  renameSync(temporary, path)
+}
+
 /** Kernel binding-store lease shared with the host; owner death releases it.
  * @param {(table:Record<string,any>)=>void} change */
 async function changeBindings(change) {
@@ -172,6 +182,8 @@ Usage: bb-channel <command> [args]
   bind <chatGuid> (--workspace PATH | --session ID) [--relay] [--no-typing]   bind a chat to a DSH workspace/session
   unbind <chatGuid>                     remove a binding
   bindings                              show the binding table
+  set-reply-target [--session ID] (--chat GUID | --none | --origin)   redirect this turn's automatic iMessage reply (default: the chat that woke it)
+  reply-target                          show the active reply-target overrides
   contacts                              show the address book (address → display name)
   set-contact <address> <name>          write the address book (used by injected messages and messages output)
   webhook [--url URL]                   check/ensure the DSH webhook is registered
@@ -188,7 +200,7 @@ function argValue(args, flag) {
 function hasFlag(args, flag) { return args.includes(flag) }
 /** @param {string[]} args @returns {string[]} */
 function positional(args) {
-  const flagsWithValue = ['--limit', '--method', '--name', '--dir', '--workspace', '--session', '--url', '--base-url', '--password']
+  const flagsWithValue = ['--limit', '--method', '--name', '--dir', '--workspace', '--session', '--url', '--base-url', '--password', '--chat']
   const out = []
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith('--')) {
@@ -326,6 +338,31 @@ async function main() {
 
     case 'bindings':
       out({ path: BINDINGS_PATH, bindings: readJson(BINDINGS_PATH, {}) })
+      return
+
+    case 'set-reply-target': {
+      // Redirect the automatic iMessage reply of the current turn: another chat,
+      // or silent. Cleared by --origin. Only affects the turn that armed the
+      // relay trigger (the plugin compares setAt with the trigger timestamp).
+      const session = argValue(rest, '--session') || process.env.DSH_SESSION_ID || null
+      if (!session) die('set-reply-target needs --session ID or a DSH_SESSION_ID environment')
+      const chat = argValue(rest, '--chat')
+      const none = hasFlag(rest, '--none')
+      const origin = hasFlag(rest, '--origin')
+      const modes = [chat !== null, none, origin].filter(Boolean).length
+      if (modes !== 1) die('set-reply-target needs exactly one of --chat GUID, --none, --origin')
+      const table = readJson(REPLY_TARGET_PATH, {})
+      if (!table || typeof table !== 'object' || Array.isArray(table)) die('reply-target store is not an object: ' + REPLY_TARGET_PATH)
+      if (origin) delete table[session]
+      else if (none) table[session] = { kind: 'none', setAt: Date.now() }
+      else table[session] = { kind: 'chat', chatGuid: /** @type {string} */ (chat), setAt: Date.now() }
+      writeJsonAtomic(REPLY_TARGET_PATH, table)
+      out({ ok: true, path: REPLY_TARGET_PATH, session, replyTarget: origin ? 'origin' : (none ? 'none' : chat) })
+      return
+    }
+
+    case 'reply-target':
+      out({ path: REPLY_TARGET_PATH, overrides: readJson(REPLY_TARGET_PATH, {}) })
       return
 
     case 'contacts':

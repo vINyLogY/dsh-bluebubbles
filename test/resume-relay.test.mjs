@@ -49,6 +49,30 @@ test('header-only cold sessions use the deployment default model', async () => {
   assert.deepEqual(fixture.mounts, ['stored-preset'])
 })
 
+test('cold resume honors a pending UI model switch even after an older in-flight request', async () => {
+  const old = { provider: 'kimi', model: 'k3', reasoningEffort: 'high', maxTokens: 4096 }
+  const selected = { provider: 'kimi', model: 'k3.1-pro', reasoningEffort: 'max' }
+  const fixture = resumeFixture('pending-model', [
+    { type: 'request/header', data: { header: { config: old } } },
+    { type: 'model/selection', data: selected },
+    { type: 'request/header', data: { header: { config: old } } },
+  ], { provider: 'default', model: 'default' })
+  await ensureLiveAgent(fixture.ctx, fixture.agents, fixture.agent.id)
+  assert.deepEqual(fixture.calls[0].agentOptions, selected)
+})
+
+test('a consumed UI selection does not override a later request or retain an old effort', async () => {
+  const selected = { provider: 'kimi', model: 'k3.1-pro', reasoningEffort: 'high' }
+  const fixture = resumeFixture('consumed-model', [
+    { type: 'model/selection', data: selected },
+    { type: 'request/header', data: { header: { config: selected } } },
+    { type: 'request/header', data: { header: { config: { provider: 'p', model: 'later', maxTokens: 1024 } } } },
+    { type: 'model/selection', data: { provider: 'p', model: 'later' } },
+  ])
+  await ensureLiveAgent(fixture.ctx, fixture.agents, fixture.agent.id)
+  assert.deepEqual(fixture.calls[0].agentOptions, { provider: 'p', model: 'later', maxTokens: 1024 })
+})
+
 test('resume skips incomplete selections and ignores invalid token limits', async () => {
   const absent = resumeFixture('no-model', [], { provider: 'deployment-provider' })
   assert.equal(await ensureLiveAgent(absent.ctx, absent.agents, absent.agent.id), undefined)
@@ -139,9 +163,11 @@ async function relayFixture(t, storedTriggers = {}) {
   const files = new Map([[env.BLUEBUBBLES_RELAY_STATE, JSON.stringify(storedTriggers)]])
   const listeners = new Map()
   const sends = []
+  const calls = []
   const shell = {
     resolve(spec) { return spec },
     async run(spec) {
+      calls.push(spec.command)
       if (spec.command.includes('/message/text?')) sends.push(spec.command)
       if (spec.command.startsWith('cat ')) return { exitCode: 1, stdout: { text: '' } }
       return { exitCode: 0, stdout: { text: '{"status":200,"data":{}}' } }
@@ -169,9 +195,10 @@ async function relayFixture(t, storedTriggers = {}) {
   await settle() // bootstrap reads stored triggers before a test arms new ones
   const event = (type, data, sessionId = 'session') => listeners.get('session/event')({ id: sessionId }, { type, data })
   return {
-    sends, files, settle, event,
+    sends, calls, files, settle, event, home,
     advance(ms) { now += ms },
-    arm: () => service.armRelay({ sessionId: 'session', chatGuid: 'chat', typing: false }),
+    arm: (options = {}) => service.armRelay({ sessionId: 'session', chatGuid: 'chat', typing: false, ...options }),
+    replyTarget(target) { files.set(home + '/bluebubbles-reply-target.json', JSON.stringify(target === null ? {} : { session: target })) },
     text(text, turn = 1) { event('assistant/message', { turn, step: 1, message: { content: [{ type: 'text', text }] } }) },
   }
 }
@@ -242,4 +269,50 @@ test('startup rejects old persisted triggers and NO_REPLY clears fresh ones', as
   fixture.text('suppressed later text')
   await fixture.settle()
   assert.equal(fixture.sends.length, 0)
+})
+
+test('a reply-target override redirects the automatic reply to another chat', async t => {
+  const fixture = await relayFixture(t)
+  await fixture.arm()
+  fixture.event('turn/start', { turn: 1 })
+  fixture.replyTarget({ kind: 'chat', chatGuid: 'other-chat', setAt: 1700000000001 })
+  fixture.text('redirected answer')
+  await fixture.settle()
+  assert.equal(fixture.sends.length, 1)
+  assert.ok(fixture.sends[0].includes('"chatGuid":"other-chat"'))
+})
+
+test('a none reply-target suppresses delivery and the typing indicator', async t => {
+  const fixture = await relayFixture(t)
+  await fixture.arm({ typing: true })
+  fixture.replyTarget({ kind: 'none', setAt: 1700000000001 })
+  fixture.event('turn/start', { turn: 1 })
+  fixture.text('this must never reach the chat')
+  await fixture.settle()
+  assert.equal(fixture.sends.length, 0)
+  assert.equal(fixture.calls.some(line => line.includes('/typing')), false)
+  assert.ok(JSON.parse(fixture.files.get('/synthetic-dsh-test/bluebubbles-reply-target.json')).session)
+})
+
+test('an override armed by an earlier turn never redirects a later one', async t => {
+  const fixture = await relayFixture(t)
+  fixture.replyTarget({ kind: 'none', setAt: 1699999000000 }) // before this turn's trigger
+  await fixture.arm()
+  fixture.text('normal answer')
+  await fixture.settle()
+  assert.equal(fixture.sends.length, 1)
+  assert.ok(fixture.sends[0].includes('"chatGuid":"chat"'))
+})
+
+test('an expired override falls back to the origin chat', async t => {
+  const fixture = await relayFixture(t)
+  await fixture.arm()
+  fixture.event('turn/start', { turn: 1 }) // claims the trigger while it is still fresh
+  fixture.replyTarget({ kind: 'chat', chatGuid: 'other-chat', setAt: 1700000000001 })
+  fixture.advance(11 * 60 * 1000) // the turn stays deliverable, the override does not
+  fixture.text('late answer')
+  await fixture.settle()
+  assert.equal(fixture.sends.length, 1)
+  assert.ok(fixture.sends[0].includes('"chatGuid":"chat"'))
+  assert.equal(fixture.sends[0].includes('other-chat'), false)
 })

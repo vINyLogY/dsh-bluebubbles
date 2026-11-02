@@ -25,7 +25,11 @@ test('optional management routes inherit actual Connection cookie and Origin fen
     unbind: () => {mutations++; return {revision: 'b'.repeat(64), bindings: []}},
     updateRelay: () => {mutations++; return {revision: 'b'.repeat(64), bindings: []}},
   }})
-  for (const [plugin, config] of [[registry], [connection, {}], [TypertGatewayService, {}], [management]]) {const f=ctx.plugin(plugin, config); fibers.push(f); await f}
+  // 0.2 adds the remote-access policy service to the real gateway assembly.
+  const access = TypertGatewayService.inject.includes('remoteAccess')
+    ? [await import('@deepseek-ai/dsh-api-remote-access')]
+    : []
+  for (const [plugin, config] of [[registry], ...access.map(plugin => [plugin.default ?? plugin]), [connection, {}], [TypertGatewayService, {}], [management]]) {const f=ctx.plugin(plugin, config); fibers.push(f); await f}
   const server=createServer(async(req,res)=>{
     if (req.url.startsWith('/?')) {ctx.connection.authorizeIndex(req,res); return}
     const route=routes.find(r=>r.kind==='prefix'&&req.url.startsWith(r.path))
@@ -59,7 +63,11 @@ test('optional management routes inherit actual Connection cookie and Origin fen
   // Actual official browser Remote face mounts the real client contribution,
   // then speaks through the authenticated HTTP carrier above (no fake $mount).
   let bundle
-  runInNewContext(await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-api-gateway/client')), 'utf8'), {window:{__ModuleLoader__:{load(value){bundle=value}}},crypto:globalThis.crypto,AbortController,AbortSignal,URL,setTimeout,clearTimeout,queueMicrotask,TextEncoder,TextDecoder,console})
+  const gatewayManifestUrl = new URL(import.meta.resolve('@deepseek-ai/dsh-api-gateway/package.json'))
+  const gatewayManifest = JSON.parse(await readFile(gatewayManifestUrl, 'utf8'))
+  const browserEntry = gatewayManifest.exports['./client'].browser
+  const clientUrl = browserEntry ? new URL(browserEntry, gatewayManifestUrl) : new URL(import.meta.resolve('@deepseek-ai/dsh-api-gateway/client'))
+  runInNewContext(await readFile(clientUrl, 'utf8'), {window:{__ModuleLoader__:{load(value){bundle=value}}},crypto:globalThis.crypto,AbortController,AbortSignal,URL,setTimeout,clearTimeout,queueMicrotask,TextEncoder,TextDecoder,console})
   const clientGateway=bundle.factory(name=>{assert.equal(name,'@deepseek-ai/cordis');return cordis})
   const client=new Context(), clientFibers=[]
   client.provide('connection',{registerGenerationSource(){return ()=>{}},start(){return {stop(){}}},generation:{getSnapshot(){}},isLoopback:true,rpc:{open(){throw new Error('No streams expected in binding management')},async call(_channel,endpoint,payload){

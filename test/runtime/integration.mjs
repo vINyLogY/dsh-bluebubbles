@@ -8,7 +8,9 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 import bridge from '../../src/index.ts'
-import { resolveSession } from '../../src/lib.ts'
+import heartbeat from '../../src/heartbeat.ts'
+import cron from '../../src/cron.ts'
+import { resolveSession, ensureLiveAgent } from '../../src/lib.ts'
 
 // Run with a real source checkout whose node_modules is the selected locked
 // cohort. Source and driver must resolve the exact same physical dependencies.
@@ -28,20 +30,22 @@ async function version(name) {
   return metadata.version
 }
 const agentVersion = await version('dsh-agent')
-const modern = agentVersion === '0.1.7-rc.2'
+const current = agentVersion === '0.2.1-rc.2'
+const modern = current || agentVersion === '0.1.7-rc.2'
 assert.ok(modern || agentVersion === '0.1.1-rc.2', 'unsupported test cohort')
-assert.equal(process.env.DSH_RUNTIME_COHORT, modern ? 'next' : 'legacy', 'cohort label must match the source-resolved runtime')
-assert.equal(await version('dsh'), modern ? '0.1.7-rc.2' : '0.1.1-rc.1')
+assert.equal(process.env.DSH_RUNTIME_COHORT, current ? 'current' : modern ? 'next' : 'legacy', 'cohort label must match the source-resolved runtime')
+assert.equal(await version('dsh'), modern ? agentVersion : '0.1.1-rc.1')
 for (const name of ['dsh-agent-loop', 'dsh-session', 'dsh-session-persistence-jsonl', 'dsh-tools']) {
-  assert.equal(await version(name), modern ? '0.1.7-rc.2' : '0.1.1-rc.2')
+  assert.equal(await version(name), modern ? agentVersion : '0.1.1-rc.2')
 }
-assert.equal(await version('dsh-shell'), modern ? '0.1.7-rc.2' : '0.1.1-rc.1')
+assert.equal(await version('dsh-shell'), modern ? agentVersion : '0.1.1-rc.1')
 await version('cordis')
 const eventsOf = session => session ? (typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events) : []
 const pkg = name => import('@deepseek-ai/' + name)
 const { Context } = await pkg('cordis')
 const { default: SessionStore } = await pkg('dsh-session')
-const { default: Persistence } = await pkg('dsh-session-persistence-jsonl')
+const persistenceModule = await pkg('dsh-session-persistence-jsonl')
+const Persistence = persistenceModule.default ?? persistenceModule
 const { default: Agents, installModelSelection } = await pkg('dsh-agent')
 const { default: AgentLoop } = await pkg('dsh-agent-loop')
 const { default: Llm, LlmAdapter } = await pkg('dsh-llm')
@@ -59,13 +63,44 @@ const CheckpointPolicy = await pkg('dsh-session-checkpoint-policy')
 if (modern) {
   const { evaluatePluginCompatibility } = await pkg('dsh-app-boot')
   const manifest = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'))
-  for (const supported of ['0.1.1-rc.1', '0.1.1-rc.2', '0.1.7-rc.2']) {
+  for (const supported of ['0.1.1-rc.1', '0.1.1-rc.2', '0.1.7-rc.2', '0.2.1-rc.2']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, supported), undefined)
   }
   for (const unsupported of ['0.1.5-rc.3', '0.1.7-rc.3']) {
     assert.ok(evaluatePluginCompatibility(manifest, {}, unsupported), 'untested host must fail the compatibility gate')
   }
 }
+
+test('scheduler plugins activate with the host services and dispose pending timers', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-bb-schedulers-'))
+  const environment = { ...process.env }
+  for (const name of Object.keys(process.env)) if (name !== 'PATH') delete process.env[name]
+  Object.assign(process.env, { HOME: home, DSH_HOME: home, HEARTBEAT_INTERVAL: '12h' })
+  const ctx = new Context(), fibers = [], timers = new Set()
+  t.after(async () => {
+    for (const fiber of fibers.reverse()) await fiber.dispose()
+    for (const name of Object.keys(process.env)) delete process.env[name]
+    Object.assign(process.env, environment)
+  })
+  await writeFile(join(home, 'heartbeat-targets.json'), JSON.stringify({ fixture: { sessionId: 'synthetic' } }))
+  await writeFile(join(home, 'cron-jobs.json'), JSON.stringify({ jobs: { fixture: { target: { sessionId: 'synthetic' }, schedule: '5 9 * * *', prompt: 'synthetic' } } }))
+  const register = (_callback, delay) => {
+    assert.ok(delay > 0)
+    const token = {}; timers.add(token)
+    return () => timers.delete(token)
+  }
+  ctx.provide('timer', { timeout: register, interval: register })
+  ctx.provide('shell', {})
+  ctx.provide('agents', { get() { assert.fail('scheduler must not dispatch while booting') } })
+  ctx.provide('workspaceRegistry', {})
+  const fs = ctx.plugin(Fs); fibers.push(fs); await fs
+  for (const plugin of [heartbeat, cron]) { const fiber = ctx.plugin(plugin); fibers.push(fiber); await fiber }
+  for (let i = 0; i < 100 && timers.size < 2; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(timers.size, 2, 'heartbeat and cron both arm their first timeout')
+  await fibers.pop().dispose()
+  await fibers.pop().dispose()
+  assert.equal(timers.size, 0, 'reload must not leave duplicate schedulers behind')
+})
 
 test('real runtime cold-resumes two fixed bindings and keeps replies and guards scoped', { timeout: 60000 }, async t => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-bb-runtime-'))
@@ -275,5 +310,22 @@ test('real runtime cold-resumes two fixed bindings and keeps replies and guards 
   assert.equal(await askApproval(outside.agent), 'allowed-once')
   await child.dispose()
   await outside.dispose()
+  if (current) {
+    // Persist a switch without sending another prompt, then cold-resume through
+    // the bridge. The first actual provider request must use the saved choice.
+    const pending = await ctx.agents.create({ sessionId: 'fixture-pending-model', meta: { cwd, agentPreset: 'fixture-preset' }, agentOptions: { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'high' } })
+    pending.agent.send({ id: 'before-switch', role: 'user', content: [{ type: 'text', text: 'before switch' }], source: { kind: 'user' } }, 'next-turn', true)
+    await pending.agent.whenIdle()
+    pending.agent.session.append('model/selection', { provider: 'switched-provider', model: 'switched-model', reasoningEffort: 'low' })
+    await pending.dispose()
+    assert.equal(ctx.agents.get('fixture-pending-model'), undefined)
+    const resumed = await ensureLiveAgent(ctx, ctx.agents, 'fixture-pending-model')
+    assert.ok(resumed)
+    resumed.send({ id: 'after-switch', role: 'user', content: [{ type: 'text', text: 'after switch' }], source: { kind: 'user' } }, 'next-turn', true)
+    await resumed.whenIdle()
+    assert.equal(requests.at(-1).provider, 'switched-provider')
+    assert.equal(requests.at(-1).model, 'switched-model')
+    assert.equal(requests.at(-1).reasoningEffort, 'low')
+  }
   console.log(`runtime: PASS ${agentVersion}; cold routes, migration, quoting, model switches and real guard waterfalls; DSH_HOME=${home}`)
 })

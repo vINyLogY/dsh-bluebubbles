@@ -113,6 +113,32 @@ After a DSH restart, a bound session resumes with the provider/model from its la
 
 When `dsh-cron` fires a job whose target session has a `relay: true` binding, it arms the same mechanism through the `bluebubbles` service's `armRelay`. **Cron task prompts must not tell the model to call send tools itself** — that would double-send.
 
+## Reply target override (per turn)
+
+By default a reply goes back to the chat that woke the session. A turn can redirect
+that automatic reply — to another chat, or to silence — without touching the binding:
+
+```
+bb-channel set-reply-target --none                       # stay silent this turn
+bb-channel set-reply-target --chat <chatGuid>            # answer somewhere else
+bb-channel set-reply-target --origin                     # back to the default
+bb-channel reply-target                                  # show current overrides
+```
+
+`--session` defaults to `DSH_SESSION_ID`, which the harness exports into every model
+shell, so the model usually passes nothing. The CLI writes
+`$DSH_HOME/bluebubbles-reply-target.json` (env `BLUEBUBBLES_REPLY_TARGET`) and the
+plugin hot-reads it before every delivery — no restart, and the file is only read at
+delivery time.
+
+Semantics: an override applies to **the turn that armed the trigger**. Entries carry a
+`setAt` timestamp; one older than the trigger belongs to a previous turn and is ignored,
+and entries expire with the same ten-minute TTL as the trigger. `--none` also suppresses
+the `typing…` indicator. A redirect to a chat bound to another session is refused (that
+chat's own replies stay its own); an unbound destination is allowed, matching the reach
+of `bb-channel send`. Text sent explicitly with the send tools is not affected by the
+override — using both in the same turn duplicates the message.
+
 ## Headless guard (no web UI attached)
 
 A session driven purely over iMessage has nobody to click the web UI's interactive cards, and both cards would otherwise park the turn forever. For any session named by the bindings table (including subagent children of one), the bridge registers prepend listeners that run ahead of the web answerers:
@@ -207,6 +233,16 @@ retain their separate authorization semantics. If a browser timeout occurs,
 the write outcome is **unknown**: refresh first; do not assume it failed or retry
 the mutation automatically. Failed saves never report success or pre-update the
 bridge's active map. CLI updates still hot-apply on the next inbound message.
+
+## DSH 0.2.1 compatibility
+
+The bridge and optional bindings UI are verified against **0.2.1-rc.2** in the
+`current` locked runtime fixture, alongside the existing 0.1.7 and legacy fixtures.
+Heartbeat and cron declare their required Cordis services directly; deployment
+wrappers are no longer needed. The legacy workflow adapter uses managed child
+activations on 0.2.1 while retaining its 0.1.7 API path. Session v4 producers,
+model selection, relay guards and the optional Chat Completions adapter retain
+their behavior. Native workflow controls pass on both 0.1.7 and 0.2.1.
 
 ## Updating the code
 

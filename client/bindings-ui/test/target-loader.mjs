@@ -17,13 +17,18 @@ const actual=async name=>import(pathToFileURL(requireTarget.resolve(name)).href)
 const cordis=await actual('@deepseek-ai/cordis');
 const slots=await actual('@deepseek-ai/dsh-client-ui-slots');
 const version=JSON.parse(await readFile(join(modules,'@deepseek-ai/dsh-client-modules/package.json'),'utf8')).version;
-assert.equal(version,'0.1.7-rc.2');
+assert.ok(['0.1.7-rc.2','0.2.1-rc.2'].includes(version));
 const dom=new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>',{url:'http://synthetic.invalid/'});
 globalThis.window=dom.window;globalThis.document=dom.window.document;
 let bootstrap;
 const target={mode:'queue',pendingQueue:[],load(value){this.pendingQueue.push(value);}};
 const context=vm.createContext({window:{__ModuleLoader__:{load:value=>bootstrap=value}},document:dom.window.document,console,setTimeout,clearTimeout,queueMicrotask,URL,AbortController,TextEncoder,TextDecoder});
-const official=async name=>readFile(requireTarget.resolve(name+'/client'),'utf8');
+const official=async name=>{
+  const manifestPath=requireTarget.resolve(name+'/package.json');
+  const manifest=JSON.parse(await readFile(manifestPath,'utf8'));
+  const browser=manifest.exports['./client'].browser;
+  return readFile(browser?new URL(browser,pathToFileURL(manifestPath)):requireTarget.resolve(name+'/client'),'utf8');
+};
 vm.runInContext(await official('@deepseek-ai/dsh-client-modules'),context);
 const moduleExports=bootstrap.factory(()=>{throw Error('Unexpected bootstrap dependency');});
 const loader=new moduleExports.ClientModuleSystem({manifest:{rev:'synthetic',modules:[],plugins:[]},staticModules:{react:React,'react-dom':ReactDom,'react-dom/client':ReactDomClient,'react/jsx-runtime':jsx,'@deepseek-ai/cordis':cordis,'@deepseek-ai/dsh-client-ui-slots':slots},bootstrapModule:{id:'@deepseek-ai/dsh-client-modules',exports:moduleExports},registrationTarget:target,loadBundle:()=>{throw Error('Unexpected external script transport');}});
